@@ -210,8 +210,13 @@ class FontProcessor:
         full_name = f"{family_name}"
         if style_name != "Regular":
             full_name += f" {style_name}"
-        
-        ps_name = f"{self.prefix}_{family_name.replace(' ', '-')}"
+
+        # If prefix is empty, don't add it to the PS name
+        if self.prefix:
+            ps_name = f"{self.prefix}_{family_name.replace(' ', '-')}"
+        else:
+            ps_name = family_name.replace(' ', '-')
+
         if style_name != "Regular":
             ps_name += f"-{style_name.replace(' ', '')}"
         
@@ -399,34 +404,44 @@ class FontProcessor:
         if "name" not in font:
             logger.warning("  No 'name' table found; skipping all name changes")
             return
-        else:
+
+        if self.prefix:
             logger.info("  Renaming the font to: " + f"{self.prefix} {metadata.full_name}")
-        
+            adjusted_family_name = f"{self.prefix} {metadata.family_name}"
+            adjusted_full_name = f"{self.prefix} {metadata.full_name}"
+        else:
+            logger.info("  Updating font metadata (no prefix)")
+            adjusted_family_name = metadata.family_name
+            adjusted_full_name = metadata.full_name
+
         # Update Family Name
-        self._set_name_records(font, 1, f"{self.prefix} {metadata.family_name}")
+        self._set_name_records(font, 1, adjusted_family_name)
         # Update Subfamily
         self._set_name_records(font, 2, metadata.style_name)
         # Update Full Name
-        self._set_name_records(font, 4, f"{self.prefix} {metadata.full_name}")
+        self._set_name_records(font, 4, adjusted_full_name)
 
         # Update Typographic Family
-        self._set_name_records(font, 16, f"{self.prefix} {metadata.family_name}")
+        self._set_name_records(font, 16, adjusted_family_name)
         # Update Preferred Subfamily
         self._set_name_records(font, 17, metadata.style_name)
         # Update Preferred Family
-        self._set_name_records(font, 18, f"{self.prefix} {metadata.family_name}")
+        self._set_name_records(font, 18, adjusted_family_name)
 
         # Update Unique ID (ID 3)
         try:
             current_unique = font["name"].getName(3, 3, 1).toUnicode()
             parts = current_unique.split("Version")
             version_info = f"Version{parts[1]}" if len(parts) == 2 else "Version 1.000"
-            new_unique_id = f"{self.prefix} {metadata.family_name.strip()}:{version_info}"
+            if self.prefix:
+                new_unique_id = f"{self.prefix} {metadata.family_name.strip()}:{version_info}"
+            else:
+                new_unique_id = f"{metadata.family_name.strip()}:{version_info}"
             if current_unique != new_unique_id:
                 self._set_name_records(font, 3, new_unique_id)
         except Exception as e:
             logger.warning(f"  Failed to update Unique ID: {e}")
-                    
+
         # Update PostScript Name (ID 6)
         new_ps_name = metadata.ps_name
         self._set_name_records(font, 6, new_ps_name)
@@ -435,10 +450,17 @@ class FontProcessor:
         if "CFF " in font:
             cff = font["CFF "].cff
             cff_topdict = cff.topDictIndex[0]
-            
+
+            if self.prefix:
+                cff_full_name = f"{self.prefix} {metadata.full_name}"
+                cff_family_name = f"{self.prefix} {metadata.family_name.replace(' ', '_')}"
+            else:
+                cff_full_name = metadata.full_name
+                cff_family_name = metadata.family_name.replace(' ', '_')
+
             name_mapping = {
-                "FullName": f"{self.prefix} {metadata.full_name}",
-                "FamilyName": f"{self.prefix} {metadata.family_name.replace(' ', '_')}"
+                "FullName": cff_full_name,
+                "FamilyName": cff_family_name
             }
 
             for key, new_value in name_mapping.items():
@@ -675,17 +697,20 @@ class FontProcessor:
         """
         dirname = os.path.dirname(original_path)
         original_name, ext = os.path.splitext(os.path.basename(original_path))
-        
+
         style_suffix = ""
         for key in STYLE_MAP:
             if key.lower() in original_name.lower():
                 style_suffix = key
                 break
-        
+
         style_part = f"-{style_suffix}" if style_suffix else ""
-        
-        base_name = f"{self.prefix}_{metadata.family_name.replace(' ', '_')}{style_part}"
-        
+
+        if self.prefix:
+            base_name = f"{self.prefix}_{metadata.family_name.replace(' ', '_')}{style_part}"
+        else:
+            base_name = f"{metadata.family_name.replace(' ', '_')}{style_part}"
+
         return os.path.join(dirname, f"{base_name}{ext.lower()}")
 
 
@@ -743,8 +768,8 @@ Examples:
         help="Font files to process (*.ttf). You can use a wildcard (glob).")
     parser.add_argument("--name", type=str, 
         help="Optional new family name for all fonts. Other font metadata like copyright info is unaffected.")
-    parser.add_argument("--prefix", type=str, default=DEFAULT_PREFIX, 
-        help=f"Prefix to add to font names. Required. (Default: {DEFAULT_PREFIX})")
+    parser.add_argument("--prefix", type=str, default=DEFAULT_PREFIX,
+        help=f"Prefix to add to font names. Set to empty string to omit prefix. (Default: {DEFAULT_PREFIX})")
     parser.add_argument("--line-percent", type=int, default=DEFAULT_LINE_PERCENT, 
         help=f"Line spacing adjustment percentage. Set to 0 to make no changes to line spacing. (Default: {DEFAULT_LINE_PERCENT})")
     parser.add_argument("--skip-kobo-kern", action="store_true", 
