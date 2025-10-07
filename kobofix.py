@@ -232,92 +232,107 @@ class FontProcessor:
     def _pair_value_to_kern(value1, value2) -> int:
         """
         Compute a legacy kerning value from GPOS PairValue records.
+
         This logic is specific to converting GPOS (OpenType) kerning to
         the older 'kern' (TrueType) table format.
+
+        Note: Only XAdvance values are used, as they directly map to kern table semantics
+        (adjusting inter-character spacing). XPlacement values shift glyphs without
+        affecting spacing and cannot be represented in the legacy kern table. To avoid
+        potential issues, XPlacement values are now being ignored.
         """
         kern_value = 0
         if value1 is not None:
             kern_value += getattr(value1, "XAdvance", 0) or 0
         if value2 is not None:
             kern_value += getattr(value2, "XAdvance", 0) or 0
-        
-        if kern_value == 0:
-            if value1 is not None:
-                kern_value += getattr(value1, "XPlacement", 0) or 0
-            if value2 is not None:
-                kern_value += getattr(value2, "XPlacement", 0) or 0
-        
+
         return int(kern_value)
     
     def _extract_format1_pairs(self, subtable) -> Dict[Tuple[str, str], int]:
         """Extract kerning pairs from PairPos Format 1 (per-glyph PairSets)."""
-        pairs = defaultdict(int)
+        pairs = {}
         coverage = getattr(subtable, "Coverage", None)
         pair_sets = getattr(subtable, "PairSet", [])
-        
+
         if not coverage or not hasattr(coverage, "glyphs"):
             return pairs
-        
+
         for idx, left_glyph in enumerate(coverage.glyphs):
             if idx >= len(pair_sets):
                 break
-            
+
             for record in getattr(pair_sets[idx], "PairValueRecord", []):
                 right_glyph = record.SecondGlyph
                 kern_value = self._pair_value_to_kern(record.Value1, record.Value2)
                 if kern_value:
-                    pairs[(left_glyph, right_glyph)] += kern_value
+                    # Only set if not already present (first value wins)
+                    key = (left_glyph, right_glyph)
+                    if key not in pairs:
+                        pairs[key] = kern_value
         return pairs
     
     def _extract_format2_pairs(self, subtable) -> Dict[Tuple[str, str], int]:
         """Extract kerning pairs from PairPos Format 2 (class-based)."""
-        pairs = defaultdict(int)
+        pairs = {}
         coverage = getattr(subtable, "Coverage", None)
         class_def1 = getattr(subtable, "ClassDef1", None)
         class_def2 = getattr(subtable, "ClassDef2", None)
         class1_records = getattr(subtable, "Class1Record", [])
-        
+
         if not coverage or not hasattr(coverage, "glyphs"):
             return pairs
-        
+
         class1_map = getattr(class_def1, "classDefs", {}) if class_def1 else {}
         left_by_class = defaultdict(list)
         for glyph in coverage.glyphs:
             class_idx = class1_map.get(glyph, 0)
             left_by_class[class_idx].append(glyph)
-        
+
         class2_map = getattr(class_def2, "classDefs", {}) if class_def2 else {}
         right_by_class = defaultdict(list)
         for glyph, class_idx in class2_map.items():
             right_by_class[class_idx].append(glyph)
-        
+
         for class1_idx, class1_record in enumerate(class1_records):
             left_glyphs = left_by_class.get(class1_idx, [])
             if not left_glyphs:
                 continue
-            
+
             for class2_idx, class2_record in enumerate(class1_record.Class2Record):
                 right_glyphs = right_by_class.get(class2_idx, [])
                 if not right_glyphs:
                     continue
-                
+
                 kern_value = self._pair_value_to_kern(class2_record.Value1, class2_record.Value2)
                 if not kern_value:
                     continue
-                
+
                 for left in left_glyphs:
                     for right in right_glyphs:
-                        pairs[(left, right)] += kern_value
+                        # Only set if not already present (first value wins)
+                        key = (left, right)
+                        if key not in pairs:
+                            pairs[key] = kern_value
         return pairs
     
     def extract_kern_pairs(self, font: TTFont) -> Dict[Tuple[str, str], int]:
         """
-        Extract all kerning pairs from GPOS PairPos lookups.
+        Extract kerning pairs from the font.
+        Prioritizes existing 'kern' table over GPOS data if present.
         GPOS (Glyph Positioning) is the modern standard for kerning in OpenType fonts.
-        This function iterates through the GPOS tables to find all kerning pairs
-        before we convert them to the legacy 'kern' table format.
         """
-        pairs = defaultdict(int)
+        pairs = {}
+
+        # If a kern table already exists, use it instead of GPOS
+        if "kern" in font:
+            kern_table = font["kern"]
+            for subtable in getattr(kern_table, "kernTables", []):
+                if hasattr(subtable, "kernTable"):
+                    pairs.update(subtable.kernTable)
+            return pairs
+
+        # Otherwise, extract from GPOS
         if "GPOS" in font:
             gpos = font["GPOS"].table
             lookup_list = getattr(gpos, "LookupList", None)
@@ -330,12 +345,16 @@ class FontProcessor:
                             if fmt == 1:
                                 format1_pairs = self._extract_format1_pairs(subtable)
                                 for key, value in format1_pairs.items():
-                                    pairs[key] += value
+                                    # Only add if not already present (first value wins)
+                                    if key not in pairs:
+                                        pairs[key] = value
                             elif fmt == 2:
                                 format2_pairs = self._extract_format2_pairs(subtable)
                                 for key, value in format2_pairs.items():
-                                    pairs[key] += value
-        return dict(pairs)
+                                    # Only add if not already present (first value wins)
+                                    if key not in pairs:
+                                        pairs[key] = value
+        return pairs
     
     @staticmethod
     def add_legacy_kern(font: TTFont, kern_pairs: Dict[Tuple[str, str], int]) -> int:
@@ -609,12 +628,23 @@ class FontProcessor:
             self.update_weight_metadata(font, font_path)
 
             if kern:
+                had_kern = "kern" in font
+                had_gpos = "GPOS" in font
+
                 kern_pairs = self.extract_kern_pairs(font)
                 if kern_pairs:
                     written = self.add_legacy_kern(font, kern_pairs)
-                    logger.info(f"  Kerning: extracted {len(kern_pairs)} pairs; wrote {written} to legacy 'kern' table.")
+                    if had_kern:
+                        logger.info(f"  Kerning: 'kern' table already existed, preserved {written} pairs.")
+                    else:
+                        logger.info(f"  Kerning: created 'kern' table from GPOS data with {written} pairs.")
                 else:
-                    logger.info("  Kerning: no GPOS kerning found.")
+                    if had_kern:
+                        logger.info("  Kerning: 'kern' table existed but was empty, no pairs written.")
+                    elif had_gpos:
+                        logger.info("  Kerning: GPOS table found but contained no kern pairs, no 'kern' table created.")
+                    else:
+                        logger.info("  Kerning: no kerning data found (no GPOS or 'kern' table), no pairs written.")
             else:
                 logger.info("  Skipping `kern` step.")
             
