@@ -601,12 +601,13 @@ class FontProcessor:
     # Main processing method
     # ============================================================
     
-    def process_font(self, 
-        kern: bool, 
-        remove_gpos: bool, 
-        font_path: str, 
+    def process_font(self,
+        kern: bool,
+        remove_gpos: bool,
+        font_path: str,
         new_name: Optional[str] = None,
         remove_prefix: Optional[str] = None,
+        remove_hints: bool = False,
     ) -> bool:
         """
         Process a single font file.
@@ -675,6 +676,34 @@ class FontProcessor:
             if remove_gpos and kern and "GPOS" in font:
                 del font["GPOS"]
                 logger.info("  Removed GPOS table from the font.")
+
+            # Remove TrueType hints if requested
+            if remove_hints:
+                hints_removed = False
+                # Remove fpgm (Font Program) table
+                if "fpgm" in font:
+                    del font["fpgm"]
+                    hints_removed = True
+                # Remove prep (Control Value Program) table
+                if "prep" in font:
+                    del font["prep"]
+                    hints_removed = True
+                # Remove cvt (Control Value Table)
+                if "cvt " in font:
+                    del font["cvt "]
+                    hints_removed = True
+                # Remove hints from glyf table using the built-in removeHinting method
+                if "glyf" in font:
+                    for glyph_name in font.getGlyphOrder():
+                        glyph = font["glyf"][glyph_name]
+                        if hasattr(glyph, 'removeHinting'):
+                            glyph.removeHinting()
+                            hints_removed = True
+
+                if hints_removed:
+                    logger.info("  Removed TrueType hints from the font.")
+                else:
+                    logger.info("  No TrueType hints found to remove.")
 
             output_path = self._generate_output_path(font_path, metadata)
             font.save(output_path)
@@ -780,8 +809,10 @@ Examples:
         help="Enable verbose output.")
     parser.add_argument("--remove-prefix", type=str,
         help="Remove a leading prefix from font names before applying the new prefix. Only works if `--name` is not used. (e.g., --remove-prefix=\"NV\")")
+    parser.add_argument("--remove-hints", action="store_true",
+        help="Remove TrueType hints from the font. This may improve render quality on some devices and reduce file size.")
 
-    
+
     args = parser.parse_args()
     
     if args.verbose:
@@ -816,9 +847,10 @@ Examples:
         if processor.process_font(
             not args.skip_kobo_kern,
             args.remove_gpos,
-            font_path, 
+            font_path,
             args.name,
             args.remove_prefix,
+            args.remove_hints,
         ):
             success_count += 1
     
