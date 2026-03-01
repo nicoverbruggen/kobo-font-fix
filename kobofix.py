@@ -50,15 +50,6 @@ STYLE_MAP = {
     "Regular": ("Regular", 400),
 }
 
-# -------------
-# SUPPORTED EXTENSIONS
-# -------------
-# Sadly, due to issues, OTF files are not supported.
-# Not a big loss, given that Kobo plays well with TTF files, 
-# not so much with OTF files that have been modified by this
-# slightly bananas script.
-#
-SUPPORTED_EXTENSIONS = (".ttf")
 
 # Configure logging for clear output
 logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -549,12 +540,14 @@ class FontProcessor:
         
         changes = []
         if panose.bWeight != expected["weight"]:
+            old_weight = panose.bWeight
             panose.bWeight = expected["weight"]
-            changes.append(f"bWeight {panose.bWeight}->{expected['weight']}")
-        
+            changes.append(f"bWeight {old_weight}->{expected['weight']}")
+
         if panose.bLetterForm != expected["letterform"]:
+            old_letterform = panose.bLetterForm
             panose.bLetterForm = expected["letterform"]
-            changes.append(f"bLetterForm {panose.bLetterForm}->{expected['letterform']}")
+            changes.append(f"bLetterForm {old_letterform}->{expected['letterform']}")
         
         if changes:
             logger.info(f"  PANOSE corrected: {', '.join(changes)}")
@@ -752,8 +745,9 @@ def validate_font_files(font_paths: List[str]) -> Tuple[List[str], List[str]]:
         if not os.path.isfile(path):
             logger.warning(f"File not found: {path}")
             continue
-        if not path.lower().endswith(SUPPORTED_EXTENSIONS):
-            logger.warning(f"Unsupported file type: {path}")
+        if not path.lower().endswith(".ttf"):
+            logger.error(f"Unsupported file type: {path} (only .ttf files are supported)")
+            invalid_files.append(os.path.basename(path))
             continue
         
         has_valid_suffix = any(
@@ -814,7 +808,13 @@ Examples:
 
 
     args = parser.parse_args()
-    
+
+    if args.remove_gpos and args.skip_kobo_kern:
+        parser.error("--remove-gpos and --skip-kobo-kern cannot be used together.")
+
+    if args.name and args.remove_prefix:
+        parser.error("--name and --remove-prefix cannot be used together. Use --name to set the font name directly, or --remove-prefix to strip an existing prefix.")
+
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
