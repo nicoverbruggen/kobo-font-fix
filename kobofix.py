@@ -626,8 +626,12 @@ class FontProcessor:
         if "OS/2" not in font or not hasattr(font["OS/2"], "panose") or font["OS/2"].panose is None:
             logger.warning("  No OS/2 table or PANOSE information found; skipping check.")
             return
-        
+
         panose = font["OS/2"].panose
+        # bFamilyType 0 means "Any" — the font has no meaningful PANOSE data
+        if panose.bFamilyType == 0:
+            logger.info("  No PANOSE classification set (bFamilyType=0); skipping check.")
+            return
         expected = style_specs.get(style_name)
         if not expected:
             logger.warning(f"  No PANOSE specification for style '{style_name}'; skipping.")
@@ -805,12 +809,14 @@ class FontProcessor:
         }
         if "OS/2" in font and hasattr(font["OS/2"], "panose") and font["OS/2"].panose:
             panose = font["OS/2"].panose
-            expected = style_specs.get(style_name, {})
-            if expected:
-                if panose.bWeight != expected["weight"]:
-                    changes.append(f"Fix PANOSE bWeight: {panose.bWeight} -> {expected['weight']}")
-                if panose.bLetterForm != expected["letterform"]:
-                    changes.append(f"Fix PANOSE bLetterForm: {panose.bLetterForm} -> {expected['letterform']}")
+            # Skip fonts with no meaningful PANOSE data (bFamilyType 0 = "Any")
+            if panose.bFamilyType != 0:
+                expected = style_specs.get(style_name, {})
+                if expected:
+                    if panose.bWeight != expected["weight"]:
+                        changes.append(f"Fix PANOSE bWeight: {panose.bWeight} -> {expected['weight']}")
+                    if panose.bLetterForm != expected["letterform"]:
+                        changes.append(f"Fix PANOSE bLetterForm: {panose.bLetterForm} -> {expected['letterform']}")
 
         # Check weight metadata
         _, os2_weight = self._get_style_from_filename(font_path)
@@ -880,7 +886,16 @@ class FontProcessor:
 
         # Check line adjustment
         if self.line_percent != 0:
-            changes.append(f"Adjust line spacing ({self.line_percent}% baseline shift)")
+            if "OS/2" in font and "head" in font:
+                upm = font["head"].unitsPerEm
+                asc = font["OS/2"].sTypoAscender
+                desc = font["OS/2"].sTypoDescender
+                gap = font["OS/2"].sTypoLineGap
+                current_pct = round(((asc - desc + gap) / upm - 1) * 100)
+                if current_pct != self.line_percent:
+                    changes.append(f"Adjust line spacing ({self.line_percent}% baseline shift, currently {current_pct}%)")
+            else:
+                changes.append(f"Adjust line spacing ({self.line_percent}% baseline shift)")
 
         # Check output path
         output_path = self._generate_output_path(font_path, metadata)
@@ -960,7 +975,17 @@ class FontProcessor:
                 self.apply_ttfautohint(output_path)
 
             if self.line_percent != 0:
-                self.apply_line_adjustment(output_path)
+                # Check if line spacing already matches target
+                needs_adjustment = True
+                if "OS/2" in font and "head" in font:
+                    upm = font["head"].unitsPerEm
+                    asc = font["OS/2"].sTypoAscender
+                    desc = font["OS/2"].sTypoDescender
+                    gap = font["OS/2"].sTypoLineGap
+                    current_pct = round(((asc - desc + gap) / upm - 1) * 100)
+                    needs_adjustment = current_pct != self.line_percent
+                if needs_adjustment:
+                    self.apply_line_adjustment(output_path)
 
             return True
         except Exception as e:
