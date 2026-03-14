@@ -1,0 +1,51 @@
+name: Validate font processing
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nicoverbruggen/fntbld-oci:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download latest Readerly font
+        run: |
+          apt-get update && apt-get install -y curl jq
+          LATEST_TAG=$(curl -s https://api.github.com/repos/nicoverbruggen/readerly/releases/latest | jq -r '.tag_name')
+          curl -L -o Readerly.zip "https://github.com/nicoverbruggen/readerly/releases/download/${LATEST_TAG}/Readerly.zip"
+          unzip Readerly.zip -d fonts
+
+      - name: Run NV preset
+        run: python3 kobofix.py --preset nv fonts/*.ttf
+
+      - name: Run KF preset on NV output
+        run: python3 kobofix.py --preset kf fonts/NV_*.ttf
+
+      - name: Validate KF fonts have kern table
+        run: |
+          python3 -c "
+          from fontTools.ttLib import TTFont
+          import glob, sys
+          errors = 0
+          for path in sorted(glob.glob('fonts/KF_*.ttf')):
+              font = TTFont(path)
+              has_kern = 'kern' in font
+              pairs = 0
+              if has_kern:
+                  for st in font['kern'].kernTables:
+                      pairs += len(st.kernTable)
+              if not has_kern or pairs == 0:
+                  print(f'FAIL: {path} — missing or empty kern table')
+                  errors += 1
+              else:
+                  print(f'OK:   {path} — {pairs} kern pairs')
+          sys.exit(1 if errors else 0)
+          "
