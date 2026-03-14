@@ -18,10 +18,15 @@ Python 3, FontTools, `font-line`.
 
 You can install them like so:
 
-
 ```bash
 pip3 install fonttools
 pip3 install font-line
+```
+
+If you want to use the `--hint additive` or `--hint overwrite` options, you also need `ttfautohint`:
+
+```bash
+brew install ttfautohint  # macOS
 ```
 
 On macOS, if you're using the built-in version of Python (via Xcode), you may need to first add a folder to your `PATH` to make `font-line` available, like:
@@ -69,90 +74,45 @@ You can customize what the script does. For more information, consult:
 ```
 
 Given the right arguments, you can:
-- Skip the `kern` step
+- Control kerning behavior (`--kern`): add a legacy kern table (default), remove GPOS after extraction, or skip entirely
+- Control hinting (`--hint`): strip hints, apply ttfautohint to unhinted fonts, apply ttfautohint to all fonts, or skip (default)
 - Use a custom name for a font
 - Use a custom name for the prefix
-- Remove the `GPOS` table entirely
 - Adjust the percentage of the `font-line` setting
 - Skip running `font-line` altogether
 
 For debugging purposes, you can run the script with the `--verbose` flag.
 
-## Examples
+## Presets
 
-### Generating KF fonts
+The script includes presets for common workflows. If no preset or flags are provided, you will be prompted to choose one.
 
-This applies the KF prefix, applies 20 percent line spacing and adds a Kobo `kern` table. Ideal if you have an existing TrueType font and you want it on your Kobo device.
+### NV preset
 
-The `--name` parameter is used to change the name of the font family.
-
-```bash
-./kobofix.py --prefix KF --name="Fonty" --line-percent 20 --remove-hints *.ttf
-```
-
-To process fonts from my [ebook-fonts](https://github.com/nicoverbruggen/ebook-fonts) collection which are prefixed with "NV", you can replace the prefix and make adjustments in bulk. 
-
-To process all fonts with the "Kobo Fix" preset, simply run:
+Prepares fonts for the [ebook-fonts](https://github.com/nicoverbruggen/ebook-fonts) repository. Applies the NV prefix and 20% line spacing. Does not modify kerning or hinting.
 
 ```bash
-./kobofix.py --prefix KF --remove-prefix="NV" --line-percent 0 *.ttf
+./kobofix.py --preset nv *.ttf
 ```
 
-(In this case, we'll set --line-percent to 0 so the line height changes aren't made, because the fonts in the NV Collection should already have those changes applied.)
-
-The expected output is then:
-
-```
-nico@m1ni kobo-font-fix % ./kobofix.py --prefix KF --remove-prefix NV *.ttf --line-percent 0
-
-Processing: NV-Elstob-Bold.ttf
-  --remove-prefix enabled: using 'Elstob' as the new family name.
-  Renaming the font to: KF Elstob Bold
-  PANOSE corrected: bWeight 8->8, bLetterForm 2->2
-  Kerning: extracted 342467 pairs; wrote 342467 to legacy 'kern' table.
-  Saved: KF_Elstob-Bold.ttf
-  Skipping line adjustment step.
-
-Processing: NV-Elstob-BoldItalic.ttf
-  --remove-prefix enabled: using 'Elstob' as the new family name.
-  Renaming the font to: KF Elstob Bold Italic
-  PANOSE corrected: bWeight 8->8, bLetterForm 3->3
-  Kerning: extracted 300746 pairs; wrote 300746 to legacy 'kern' table.
-  Saved: KF_Elstob-BoldItalic.ttf
-  Skipping line adjustment step.
-
-Processing: NV-Elstob-Italic.ttf
-  --remove-prefix enabled: using 'Elstob' as the new family name.
-  Renaming the font to: KF Elstob Italic
-  PANOSE corrected: bWeight 5->5, bLetterForm 3->3
-  Kerning: extracted 286857 pairs; wrote 286856 to legacy 'kern' table.
-  Saved: KF_Elstob-Italic.ttf
-  Skipping line adjustment step.
-
-Processing: NV-Elstob-Regular.ttf
-  --remove-prefix enabled: using 'Elstob' as the new family name.
-  Renaming the font to: KF Elstob
-  PANOSE corrected: bWeight 5->5, bLetterForm 2->2
-  Kerning: extracted 313998 pairs; wrote 313998 to legacy 'kern' table.
-  Saved: KF_Elstob-Regular.ttf
-  Skipping line adjustment step.
-
-==================================================
-Processed 4/4 fonts successfully.
-```
-
-### Generating NV fonts
-
-Tight spacing, with a custom font family name:
+You can override individual settings, for example to use relaxed spacing:
 
 ```bash
-./kobofix.py --prefix NV --name="Fonty" --line-percent 20 --skip-kobo-kern *.ttf
+./kobofix.py --preset nv --line-percent 50 *.ttf
 ```
 
-Relaxed spacing, with a custom font family name:
+### KF preset
+
+Prepares KF fonts from NV fonts for use on Kobo devices. Applies the KF prefix, replaces the NV prefix, and adds a legacy kern table. No line spacing changes are made (since NV fonts already have those applied).
 
 ```bash
-./kobofix.py --prefix NV --name="Fonty" --line-percent 50 --skip-kobo-kern *.ttf
+./kobofix.py --preset kf *.ttf
 ```
 
-You can play around with `--line-percent` to see what works for you.
+### Custom processing
+
+You can also specify all flags manually:
+
+```bash
+./kobofix.py --prefix KF --name="Fonty" --line-percent 20 --kern add-legacy-kern *.ttf
+```

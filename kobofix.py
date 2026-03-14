@@ -30,11 +30,24 @@ from fontTools.ttLib import TTFont, newTable
 from fontTools.ttLib.tables._k_e_r_n import KernTable_format_0
 
 # -------------
-# DEFAULTS
+# PRESETS
 # -------------
 #
-DEFAULT_PREFIX = "KF"
-DEFAULT_LINE_PERCENT = 20
+PRESETS = {
+    "nv": {
+        "prefix": "NV",
+        "line_percent": 20,
+        "kern": "skip",
+        "hint": "skip",
+    },
+    "kf": {
+        "prefix": "KF",
+        "line_percent": 0,
+        "kern": "add-legacy-kern",
+        "hint": "skip",
+        "remove_prefix": "NV",
+    },
+}
 
 # -------------
 # STYLE MAPPING
@@ -72,9 +85,9 @@ class FontProcessor:
     Main font processing class.
     """
     
-    def __init__(self, 
-        prefix: str = DEFAULT_PREFIX, 
-        line_percent: int = DEFAULT_LINE_PERCENT
+    def __init__(self,
+        prefix: str,
+        line_percent: int,
     ):
         """
         Initialize the font processor with configurable values.
@@ -334,49 +347,117 @@ class FontProcessor:
             lookup_list = getattr(gpos, "LookupList", None)
             if lookup_list and lookup_list.Lookup:
                 for lookup in lookup_list.Lookup:
-                    # Only process Pair Adjustment lookups (type 2)
-                    if getattr(lookup, "LookupType", None) == 2:
-                        for subtable in getattr(lookup, "SubTable", []):
-                            fmt = getattr(subtable, "Format", None)
-                            if fmt == 1:
-                                format1_pairs = self._extract_format1_pairs(subtable)
-                                for key, value in format1_pairs.items():
-                                    # Only add if not already present (first value wins)
-                                    if key not in pairs:
-                                        pairs[key] = value
-                            elif fmt == 2:
-                                format2_pairs = self._extract_format2_pairs(subtable)
-                                for key, value in format2_pairs.items():
-                                    # Only add if not already present (first value wins)
-                                    if key not in pairs:
-                                        pairs[key] = value
+                    lookup_type = getattr(lookup, "LookupType", None)
+                    subtables = getattr(lookup, "SubTable", [])
+
+                    # Unwrap Extension lookups (type 9) to get the inner subtables
+                    if lookup_type == 9:
+                        unwrapped = []
+                        for ext_subtable in subtables:
+                            ext_type = getattr(ext_subtable, "ExtensionLookupType", None)
+                            inner = getattr(ext_subtable, "ExtSubTable", None)
+                            if ext_type == 2 and inner is not None:
+                                unwrapped.append(inner)
+                        subtables = unwrapped
+                        lookup_type = 2 if unwrapped else None
+
+                    if lookup_type != 2:
+                        continue
+
+                    for subtable in subtables:
+                        fmt = getattr(subtable, "Format", None)
+                        if fmt == 1:
+                            extracted = self._extract_format1_pairs(subtable)
+                        elif fmt == 2:
+                            extracted = self._extract_format2_pairs(subtable)
+                        else:
+                            continue
+                        for key, value in extracted.items():
+                            if key not in pairs:
+                                pairs[key] = value
         return pairs
     
+    @staticmethod
+    def _glyph_priority(glyph_name: str, cmap_reverse: Dict[str, int]) -> int:
+        """
+        Assign a priority to a glyph for kern pair sorting.
+        Lower values = higher priority. Pairs involving common glyphs
+        are prioritized so they fit within the subtable size limit.
+        """
+        cp = cmap_reverse.get(glyph_name)
+        if cp is None:
+            return 4  # unmapped glyphs (ligatures, alternates, etc.)
+        if cp <= 0x007F:
+            return 0  # Basic Latin (A-Z, a-z, digits, punctuation)
+        if cp <= 0x00FF:
+            return 1  # Latin-1 Supplement (accented chars, common symbols)
+        if cp <= 0x024F:
+            return 2  # Latin Extended-A and B
+        return 3      # everything else
+
     @staticmethod
     def add_legacy_kern(font: TTFont, kern_pairs: Dict[Tuple[str, str], int]) -> int:
         """
         Create or replace a legacy 'kern' table with the supplied pairs.
-        Splits into multiple subtables if there are more than 10,000 pairs.
+
+        The legacy kern table format has strict size constraints:
+        - Most renderers (including Kobo's WebKit-based engine) only read the
+          first subtable, so we write exactly one.
+        - Format 0 subtables have a uint16 length field (max 65,535 bytes).
+          With a 14-byte header and 6 bytes per pair, this allows at most
+          (65,535 - 14) / 6 = 10,920 pairs before the length overflows.
+
+        When a font has more pairs than this (common with class-based GPOS
+        kerning, which can expand to 100k+ individual pairs), we prioritize
+        by Unicode range so the most commonly encountered pairs are kept:
+          - Basic Latin (U+0000-007F): English, digits, punctuation
+          - Latin-1 Supplement (U+0080-00FF): Western European accented chars
+          - Latin Extended-A/B (U+0100-024F): Central/Eastern European chars
+          - Everything else and unmapped glyphs (ligatures, alternates)
+
+        This means all English kerning is preserved, most Western European
+        kerning (French, German, Spanish, etc.) is preserved, and only less
+        common extended Latin pairings are dropped when truncation is needed.
         """
         if not kern_pairs:
             return 0
+
+        MAX_PAIRS = 10920
+        items = [(tuple(k), int(v)) for k, v in kern_pairs.items() if v]
+
+        if len(items) > MAX_PAIRS:
+            # Build reverse cmap (glyph name -> codepoint) for prioritization
+            cmap_reverse = {}
+            if "cmap" in font:
+                for table in font["cmap"].tables:
+                    if hasattr(table, "cmap"):
+                        for cp, glyph_name in table.cmap.items():
+                            if glyph_name not in cmap_reverse:
+                                cmap_reverse[glyph_name] = cp
+
+            # Sort by priority of both glyphs (lower = more common)
+            items.sort(key=lambda pair: (
+                FontProcessor._glyph_priority(pair[0][0], cmap_reverse) +
+                FontProcessor._glyph_priority(pair[0][1], cmap_reverse)
+            ))
+
+            logger.warning(f"  Kerning: {len(items)} pairs exceed the subtable limit of {MAX_PAIRS}. "
+                           f"Keeping the {MAX_PAIRS} most common pairs.")
+            items = items[:MAX_PAIRS]
 
         kern_table = newTable("kern")
         kern_table.version = 0
         kern_table.kernTables = []
 
-        # Max pairs per subtable
-        MAX_PAIRS = 10000
-        items = [(tuple(k), int(v)) for k, v in kern_pairs.items() if v]
+        subtable = KernTable_format_0()
+        subtable.version = 0
+        subtable.length = None
+        subtable.coverage = 1
+        subtable.kernTable = dict(items)
+        kern_table.kernTables.append(subtable)
 
-        for i in range(0, len(items), MAX_PAIRS):
-            chunk = dict(items[i:i + MAX_PAIRS])
-            subtable = KernTable_format_0()
-            subtable.version = 0
-            subtable.length = None
-            subtable.coverage = 1
-            subtable.kernTable = chunk
-            kern_table.kernTables.append(subtable)
+        # Additional subtables are not created because most renderers
+        # (including Kobo's WebKit-based engine) only read the first one.
 
         font["kern"] = kern_table
 
@@ -645,8 +726,7 @@ class FontProcessor:
     # ============================================================
     
     def process_font(self,
-        kern: bool,
-        remove_gpos: bool,
+        kern_mode: str,
         font_path: str,
         new_name: Optional[str] = None,
         remove_prefix: Optional[str] = None,
@@ -693,7 +773,11 @@ class FontProcessor:
             self.check_and_fix_panose(font, font_path)
             self.update_weight_metadata(font, font_path)
 
-            if kern:
+            # Note: As of firmware 4.45, Kobo reads GPOS kerning data correctly,
+            # but only when webkitTextRendering=optimizeLegibility is enabled.
+            # Since this setting is disabled by default, a legacy kern table is
+            # still needed for most users.
+            if kern_mode in ("add-legacy-kern", "legacy-kern-only"):
                 had_kern = "kern" in font
                 had_gpos = "GPOS" in font
 
@@ -711,14 +795,12 @@ class FontProcessor:
                         logger.info("  Kerning: GPOS table found but contained no kern pairs, no 'kern' table created.")
                     else:
                         logger.info("  Kerning: no kerning data found (no GPOS or 'kern' table), no pairs written.")
+
+                if kern_mode == "legacy-kern-only" and "GPOS" in font:
+                    del font["GPOS"]
+                    logger.info("  Removed GPOS table from the font.")
             else:
                 logger.info("  Skipping `kern` step.")
-            
-            # The GPOS table is removed after the kerning data has been extracted
-            # and written to the `kern` table. This ensures the information is not lost.
-            if remove_gpos and kern and "GPOS" in font:
-                del font["GPOS"]
-                logger.info("  Removed GPOS table from the font.")
 
             if hint_mode == "strip":
                 self.strip_hints(font)
@@ -809,103 +891,135 @@ def validate_font_files(font_paths: List[str]) -> Tuple[List[str], List[str]]:
 
 def main():
     """Main entry point."""
+    preset_names = ", ".join(PRESETS.keys())
+
     parser = argparse.ArgumentParser(
         description="Process fonts for Kobo e-readers: add prefix, kern table, "
                    "PANOSE validation, and line adjustments.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
+Presets:
+  nv    Prepare fonts for the ebook-fonts repository. Applies NV prefix,
+        20%% line spacing. Does not modify kerning or hinting.
+  kf    Prepare KF fonts from NV fonts. Applies KF prefix, replaces NV
+        prefix, adds legacy kern table. No line spacing changes.
+
 Examples:
-  For a default experience, which will prefix the font with KF, add `kern` table and adjust line-height:
-  %(prog)s *.ttf
+  Using a preset:
+  %(prog)s --preset nv *.ttf
+  %(prog)s --preset kf *.ttf
 
-  If you want to rename the font:
-  %(prog)s --prefix KF --name="Fonty" --line-percent 20 *.ttf
+  Custom processing:
+  %(prog)s --prefix KF --name="Fonty" --line-percent 20 --kern add-legacy-kern *.ttf
 
-  If you want to keep the line-height because for a given font the default was fine:
-  %(prog)s --line-percent 0 *.ttf
-
-  For improved legacy support, you can remove the GPOS table (not recommended):
-  %(prog)s --prefix KF --name="Fonty" --line-percent 20 --remove-gpos *.ttf
-
-  To remove a specific prefix, like "NV", before applying a new one:
-  %(prog)s --prefix KF --remove-prefix="NV" *.ttf
+  If no preset or flags are provided, you will be prompted to choose a preset.
         """
     )
-    
-    parser.add_argument("fonts", nargs="+", 
+
+    parser.add_argument("fonts", nargs="+",
         help="Font files to process (*.ttf). You can use a wildcard (glob).")
-    parser.add_argument("--name", type=str, 
+    parser.add_argument("--preset", type=str, choices=PRESETS.keys(),
+        help=f"Use a preset configuration ({preset_names}).")
+    parser.add_argument("--name", type=str,
         help="Optional new family name for all fonts. Other font metadata like copyright info is unaffected.")
-    parser.add_argument("--prefix", type=str, default=DEFAULT_PREFIX,
-        help=f"Prefix to add to font names. Set to empty string to omit prefix. (Default: {DEFAULT_PREFIX})")
-    parser.add_argument("--line-percent", type=int, default=DEFAULT_LINE_PERCENT, 
-        help=f"Line spacing adjustment percentage. Set to 0 to make no changes to line spacing. (Default: {DEFAULT_LINE_PERCENT})")
-    parser.add_argument("--skip-kobo-kern", action="store_true", 
-        help="Skip the creation of the legacy 'kern' table from GPOS data.")
-    parser.add_argument("--remove-gpos", action="store_true", 
-        help="Remove the GPOS table after converting kerning to a 'kern' table. Does not work if `--skip-kobo-kern` is set.")
-    parser.add_argument("--verbose", action="store_true", 
+    parser.add_argument("--prefix", type=str,
+        help="Prefix to add to font names. Set to empty string to omit prefix.")
+    parser.add_argument("--line-percent", type=int,
+        help="Line spacing adjustment percentage. Set to 0 to make no changes to line spacing.")
+    parser.add_argument("--kern", type=str,
+        choices=["add-legacy-kern", "legacy-kern-only", "skip"],
+        help="Kerning mode: 'add-legacy-kern' extracts GPOS pairs into a legacy kern table, "
+             "'legacy-kern-only' does the same but removes the GPOS table afterwards, "
+             "'skip' leaves kerning untouched.")
+    parser.add_argument("--verbose", action="store_true",
         help="Enable verbose output.")
     parser.add_argument("--remove-prefix", type=str,
         help="Remove a leading prefix from font names before applying the new prefix. Only works if `--name` is not used. (e.g., --remove-prefix=\"NV\")")
-    parser.add_argument("--hint", type=str, default="skip",
+    parser.add_argument("--hint", type=str,
         choices=["skip", "additive", "overwrite", "strip"],
-        help="Hinting mode: 'skip' does nothing (default), 'additive' runs ttfautohint on fonts lacking hints, "
+        help="Hinting mode: 'skip' does nothing, 'additive' runs ttfautohint on fonts lacking hints, "
              "'overwrite' runs ttfautohint on all fonts, 'strip' removes all TrueType hints.")
 
-
     args = parser.parse_args()
-
-    if args.remove_gpos and args.skip_kobo_kern:
-        parser.error("--remove-gpos and --skip-kobo-kern cannot be used together.")
-
-    if args.name and args.remove_prefix:
-        parser.error("--name and --remove-prefix cannot be used together. Use --name to set the font name directly, or --remove-prefix to strip an existing prefix.")
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    # Determine which flags were explicitly set by the user
+    manual_flags = {k for k in ("prefix", "line_percent", "kern", "hint", "remove_prefix", "name")
+                    if getattr(args, k) is not None}
+
+    # If no preset and no manual flags, prompt the user to choose a preset
+    if args.preset is None and not manual_flags:
+        logger.info("No preset or flags specified. Available presets:")
+        for name, values in PRESETS.items():
+            logger.info(f"  {name}")
+        choice = input("\nChoose a preset: ").strip().lower()
+        if choice not in PRESETS:
+            logger.error(f"Unknown preset '{choice}'. Available: {preset_names}")
+            sys.exit(1)
+        args.preset = choice
+
+    # Apply preset values as defaults, then let explicit flags override
+    if args.preset:
+        preset = PRESETS[args.preset]
+        for key, value in preset.items():
+            if key not in manual_flags:
+                setattr(args, key, value)
+
+    # Fill in remaining defaults for any unset flags
+    if args.prefix is None:
+        parser.error("--prefix is required when not using a preset.")
+    if args.line_percent is None:
+        parser.error("--line-percent is required when not using a preset.")
+    if args.kern is None:
+        args.kern = "skip"
+    if args.hint is None:
+        args.hint = "skip"
+
+    if args.name and args.remove_prefix:
+        parser.error("--name and --remove-prefix cannot be used together. Use --name to set the font name directly, or --remove-prefix to strip an existing prefix.")
+
     check_dependencies(args.hint, args.line_percent)
-    
+
     valid_files, invalid_files = validate_font_files(args.fonts)
-    
+
     if invalid_files:
         logger.error("\nERROR: The following fonts have invalid filenames:")
         logger.error(f"(Must contain one of the following: {', '.join(STYLE_MAP.keys())})")
         for filename in invalid_files:
             logger.error(f"  {filename}")
-        
+
         if not valid_files:
             sys.exit(1)
-        
+
         response = input("\nContinue with valid files only? [y/N]: ")
         if response.lower() != 'y':
             sys.exit(1)
-    
+
     if not valid_files:
         logger.error("No valid font files to process.")
         sys.exit(1)
-    
+
     processor = FontProcessor(
         prefix=args.prefix,
         line_percent=args.line_percent,
     )
-    
+
     success_count = 0
     for font_path in valid_files:
         if processor.process_font(
-            not args.skip_kobo_kern,
-            args.remove_gpos,
+            args.kern,
             font_path,
             args.name,
             args.remove_prefix,
             args.hint,
         ):
             success_count += 1
-    
+
     logger.info(f"\n{'='*50}")
     logger.info(f"Processed {success_count}/{len(valid_files)} fonts successfully.")
-    
+
     if success_count < len(valid_files):
         sys.exit(1)
 
