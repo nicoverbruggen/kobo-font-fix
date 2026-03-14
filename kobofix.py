@@ -555,6 +555,60 @@ class FontProcessor:
             logger.info("  PANOSE check passed, no modifications required.")
     
     # ============================================================
+    # Hinting methods
+    # ============================================================
+
+    @staticmethod
+    def _font_has_hints(font: TTFont) -> bool:
+        """Check whether a font contains TrueType hinting data."""
+        if "fpgm" in font or "prep" in font or "cvt " in font:
+            return True
+        if "glyf" in font:
+            for glyph_name in font.getGlyphOrder():
+                glyph = font["glyf"][glyph_name]
+                if hasattr(glyph, 'program') and glyph.program and glyph.program.getAssembly():
+                    return True
+        return False
+
+    @staticmethod
+    def strip_hints(font: TTFont) -> None:
+        """Remove all TrueType hints from the font."""
+        hints_removed = False
+        for table in ("fpgm", "prep", "cvt "):
+            if table in font:
+                del font[table]
+                hints_removed = True
+        if "glyf" in font:
+            for glyph_name in font.getGlyphOrder():
+                glyph = font["glyf"][glyph_name]
+                if hasattr(glyph, 'removeHinting'):
+                    glyph.removeHinting()
+                    hints_removed = True
+        if hints_removed:
+            logger.info("  Removed TrueType hints from the font.")
+        else:
+            logger.info("  No TrueType hints found to remove.")
+
+    def apply_ttfautohint(self, font_path: str) -> bool:
+        """Run ttfautohint on a saved font file, replacing it in-place."""
+        try:
+            hinted_path = font_path + ".hinted"
+            subprocess.run(
+                ["ttfautohint", font_path, hinted_path],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            )
+            os.replace(hinted_path, font_path)
+            logger.info("  Applied ttfautohint.")
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"  ttfautohint failed: {e}")
+            # Clean up temp file if it exists
+            hinted_path = font_path + ".hinted"
+            if os.path.exists(hinted_path):
+                os.remove(hinted_path)
+            return False
+
+    # ============================================================
     # Line adjustment methods
     # ============================================================
     
@@ -566,10 +620,6 @@ class FontProcessor:
         after the external utility has run.
         """
         try:
-            if subprocess.run(["which", "font-line"], capture_output=True).returncode != 0:
-                logger.error("  font-line utility not found. Please install it first.")
-                return False
-            
             subprocess.run(["font-line", "percent", str(self.line_percent), font_path], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             
             base, ext = os.path.splitext(font_path)
@@ -600,7 +650,7 @@ class FontProcessor:
         font_path: str,
         new_name: Optional[str] = None,
         remove_prefix: Optional[str] = None,
-        remove_hints: bool = False,
+        hint_mode: str = "skip",
     ) -> bool:
         """
         Process a single font file.
@@ -670,37 +720,17 @@ class FontProcessor:
                 del font["GPOS"]
                 logger.info("  Removed GPOS table from the font.")
 
-            # Remove TrueType hints if requested
-            if remove_hints:
-                hints_removed = False
-                # Remove fpgm (Font Program) table
-                if "fpgm" in font:
-                    del font["fpgm"]
-                    hints_removed = True
-                # Remove prep (Control Value Program) table
-                if "prep" in font:
-                    del font["prep"]
-                    hints_removed = True
-                # Remove cvt (Control Value Table)
-                if "cvt " in font:
-                    del font["cvt "]
-                    hints_removed = True
-                # Remove hints from glyf table using the built-in removeHinting method
-                if "glyf" in font:
-                    for glyph_name in font.getGlyphOrder():
-                        glyph = font["glyf"][glyph_name]
-                        if hasattr(glyph, 'removeHinting'):
-                            glyph.removeHinting()
-                            hints_removed = True
-
-                if hints_removed:
-                    logger.info("  Removed TrueType hints from the font.")
-                else:
-                    logger.info("  No TrueType hints found to remove.")
+            if hint_mode == "strip":
+                self.strip_hints(font)
 
             output_path = self._generate_output_path(font_path, metadata)
             font.save(output_path)
             logger.info(f"  Saved: {output_path}")
+
+            if hint_mode == "overwrite":
+                self.apply_ttfautohint(output_path)
+            elif hint_mode == "additive" and not self._font_has_hints(font):
+                self.apply_ttfautohint(output_path)
 
             if self.line_percent != 0:
                 self.apply_line_adjustment(output_path)
@@ -734,6 +764,21 @@ class FontProcessor:
             base_name = f"{metadata.family_name.replace(' ', '_')}{style_part}"
 
         return os.path.join(dirname, f"{base_name}{ext.lower()}")
+
+
+def check_dependencies(hint_mode: str, line_percent: int) -> None:
+    """Check that all required external tools are available before processing."""
+    missing = []
+    if hint_mode in ("additive", "overwrite"):
+        if subprocess.run(["which", "ttfautohint"], capture_output=True).returncode != 0:
+            missing.append("ttfautohint")
+    if line_percent != 0:
+        if subprocess.run(["which", "font-line"], capture_output=True).returncode != 0:
+            missing.append("font-line")
+    if missing:
+        logger.error(f"Missing required dependencies: {', '.join(missing)}")
+        logger.error("Please install them before running this script.")
+        sys.exit(1)
 
 
 def validate_font_files(font_paths: List[str]) -> Tuple[List[str], List[str]]:
@@ -803,8 +848,10 @@ Examples:
         help="Enable verbose output.")
     parser.add_argument("--remove-prefix", type=str,
         help="Remove a leading prefix from font names before applying the new prefix. Only works if `--name` is not used. (e.g., --remove-prefix=\"NV\")")
-    parser.add_argument("--remove-hints", action="store_true",
-        help="Remove TrueType hints from the font. This may improve render quality on some devices and reduce file size.")
+    parser.add_argument("--hint", type=str, default="skip",
+        choices=["skip", "additive", "overwrite", "strip"],
+        help="Hinting mode: 'skip' does nothing (default), 'additive' runs ttfautohint on fonts lacking hints, "
+             "'overwrite' runs ttfautohint on all fonts, 'strip' removes all TrueType hints.")
 
 
     args = parser.parse_args()
@@ -817,6 +864,8 @@ Examples:
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    check_dependencies(args.hint, args.line_percent)
     
     valid_files, invalid_files = validate_font_files(args.fonts)
     
@@ -850,7 +899,7 @@ Examples:
             font_path,
             args.name,
             args.remove_prefix,
-            args.remove_hints,
+            args.hint,
         ):
             success_count += 1
     
