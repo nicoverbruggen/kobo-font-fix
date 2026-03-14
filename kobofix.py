@@ -2,18 +2,24 @@
 """
 Font processing utility for Kobo e-readers.
 
-This script processes TrueType fonts to improve compatibility with
-Kobo e-readers by:
-- Adding a custom prefix to font names
-- Updating the font name if necessary, including PS name
-- Extracting GPOS kerning data and creating legacy 'kern' tables
-- Validating and correcting PANOSE metadata
-- Adjusting font metrics for better line spacing
-- Updating font weight metadata (OS/2 usWeightClass and PostScript weight string)
+Processes TrueType fonts to improve compatibility with Kobo e-readers:
+- Renaming fonts with a configurable prefix and updating internal metadata
+  (name table, CFF, post table, PS name)
+- Validating and correcting PANOSE metadata based on font style
+- Updating font weight metadata (OS/2 usWeightClass)
+- Adjusting line spacing via font-line
+- Kerning: extracting GPOS pairs (Format 1, Format 2, and Extension lookups)
+  into a legacy kern table, prioritized by Unicode range to fit within
+  format 0 size constraints
+- Hinting: optionally stripping hints or applying ttfautohint
+
+Includes NV and KF presets for common workflows, or can be fully
+configured via individual flags. Run with -h for usage details.
 
 Requirements:
 - fontTools (pip install fonttools)
-- font-line utility (https://github.com/source-foundry/font-line)
+- font-line (pip install font-line)
+- ttfautohint (optional, for --hint additive/overwrite)
 """
 
 import sys
