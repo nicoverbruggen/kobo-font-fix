@@ -13,6 +13,7 @@ Processes TrueType fonts to improve compatibility with Kobo e-readers:
   format 0 size constraints
 - Hinting: optionally stripping hints or applying ttfautohint
 
+Supports --dry-run to preview what would change without modifying files.
 Includes NV and KF presets for common workflows, or can be fully
 configured via individual flags. Run with -h for usage details.
 
@@ -731,6 +732,158 @@ class FontProcessor:
     # Main processing method
     # ============================================================
     
+    def dry_run(self,
+        kern_mode: str,
+        font_path: str,
+        new_name: Optional[str] = None,
+        remove_prefix: Optional[str] = None,
+        hint_mode: str = "skip",
+    ) -> bool:
+        """
+        Report what would change without modifying any files.
+        """
+        logger.info(f"\nDry run: {font_path}")
+
+        try:
+            font = TTFont(font_path)
+        except Exception as e:
+            logger.error(f"  Failed to open font: {e}")
+            return False
+
+        changes = []
+
+        # Check WWS names
+        if font["name"]:
+            has_wws = any(n.nameID in (21, 22) for n in font["name"].names)
+            if has_wws:
+                changes.append("Remove WWS Family/Subfamily names (ID 21, 22)")
+
+        # Determine effective name
+        effective_name = new_name
+        if new_name is None:
+            current_family_name = font["name"].getBestFamilyName()
+            if remove_prefix and current_family_name.startswith(remove_prefix + " "):
+                effective_name = current_family_name[len(remove_prefix + " "):]
+
+        metadata = self._get_font_metadata(font, font_path, effective_name)
+        if not metadata:
+            return False
+
+        # Check rename
+        if self.prefix:
+            target_full = f"{self.prefix} {metadata.full_name}"
+        else:
+            target_full = metadata.full_name
+        current_full = font["name"].getBestFullName() if "name" in font else None
+        if current_full != target_full:
+            changes.append(f"Rename font to '{target_full}'")
+
+        # Check PANOSE
+        style_name, _ = self._get_style_from_filename(font_path)
+        style_specs = {
+            "Bold Italic": {"weight": 8, "letterform": 3},
+            "Bold": {"weight": 8, "letterform": 2},
+            "Italic": {"weight": 5, "letterform": 3},
+            "Regular": {"weight": 5, "letterform": 2},
+        }
+        if "OS/2" in font and hasattr(font["OS/2"], "panose") and font["OS/2"].panose:
+            panose = font["OS/2"].panose
+            expected = style_specs.get(style_name, {})
+            if expected:
+                if panose.bWeight != expected["weight"]:
+                    changes.append(f"Fix PANOSE bWeight: {panose.bWeight} -> {expected['weight']}")
+                if panose.bLetterForm != expected["letterform"]:
+                    changes.append(f"Fix PANOSE bLetterForm: {panose.bLetterForm} -> {expected['letterform']}")
+
+        # Check weight metadata
+        _, os2_weight = self._get_style_from_filename(font_path)
+        if "OS/2" in font and hasattr(font["OS/2"], "usWeightClass"):
+            if font["OS/2"].usWeightClass != os2_weight:
+                changes.append(f"Update usWeightClass: {font['OS/2'].usWeightClass} -> {os2_weight}")
+
+        # Check kerning
+        if kern_mode in ("add-legacy-kern", "legacy-kern-only"):
+            has_kern = "kern" in font
+            has_gpos = "GPOS" in font
+
+            # Extract what the kern table would contain after processing
+            new_pairs = self.extract_kern_pairs(font)
+            if new_pairs:
+                new_items = [(tuple(k), int(v)) for k, v in new_pairs.items() if v]
+                # Apply the same prioritization/capping as add_legacy_kern
+                if len(new_items) > 10920:
+                    cmap_reverse = {}
+                    if "cmap" in font:
+                        for table in font["cmap"].tables:
+                            if hasattr(table, "cmap"):
+                                for cp, glyph_name in table.cmap.items():
+                                    if glyph_name not in cmap_reverse:
+                                        cmap_reverse[glyph_name] = cp
+                    new_items.sort(key=lambda pair: (
+                        self._glyph_priority(pair[0][0], cmap_reverse) +
+                        self._glyph_priority(pair[0][1], cmap_reverse)
+                    ))
+                    total = len(new_items)
+                    new_items = new_items[:10920]
+                else:
+                    total = len(new_items)
+                new_table = dict(new_items)
+
+                # Compare against existing kern table
+                if has_kern:
+                    existing_pairs = {}
+                    for st in font["kern"].kernTables:
+                        if hasattr(st, "kernTable"):
+                            existing_pairs.update(st.kernTable)
+                    if existing_pairs == new_table:
+                        pass  # kern table already matches
+                    else:
+                        changes.append(f"Update kern table ({len(new_table)} pairs)")
+                else:
+                    changes.append(f"Create legacy kern table from GPOS ({len(new_table)} pairs)")
+                if total > 10920:
+                    changes.append(f"  Truncate from {total} to 10920 pairs (format 0 limit)")
+            else:
+                if not has_kern and has_gpos:
+                    changes.append("GPOS table found but contained no kern pairs")
+                elif not has_kern:
+                    changes.append("No kerning data found (no GPOS or kern table)")
+
+            if kern_mode == "legacy-kern-only" and has_gpos:
+                changes.append("Remove GPOS table")
+
+        # Check hinting
+        if hint_mode == "strip":
+            if self._font_has_hints(font):
+                changes.append("Strip TrueType hints")
+            else:
+                changes.append("No hints to strip")
+        elif hint_mode == "overwrite":
+            changes.append("Apply ttfautohint (overwrite)")
+        elif hint_mode == "additive":
+            if self._font_has_hints(font):
+                changes.append("Skip ttfautohint (font already has hints)")
+            else:
+                changes.append("Apply ttfautohint (additive)")
+
+        # Check line adjustment
+        if self.line_percent != 0:
+            changes.append(f"Adjust line spacing ({self.line_percent}% baseline shift)")
+
+        # Check output path
+        output_path = self._generate_output_path(font_path, metadata)
+        if output_path != font_path:
+            changes.append(f"Save as: {output_path}")
+
+        # Report
+        if changes:
+            for change in changes:
+                logger.info(f"  {change}")
+        else:
+            logger.info("  No changes needed.")
+
+        return True
+
     def process_font(self,
         kern_mode: str,
         font_path: str,
@@ -937,6 +1090,8 @@ Examples:
         help="Kerning mode: 'add-legacy-kern' extracts GPOS pairs into a legacy kern table, "
              "'legacy-kern-only' does the same but removes the GPOS table afterwards, "
              "'skip' leaves kerning untouched.")
+    parser.add_argument("--dry-run", action="store_true",
+        help="Report what would change without modifying any files.")
     parser.add_argument("--verbose", action="store_true",
         help="Enable verbose output.")
     parser.add_argument("--remove-prefix", type=str,
@@ -986,7 +1141,8 @@ Examples:
     if args.name and args.remove_prefix:
         parser.error("--name and --remove-prefix cannot be used together. Use --name to set the font name directly, or --remove-prefix to strip an existing prefix.")
 
-    check_dependencies(args.hint, args.line_percent)
+    if not args.dry_run:
+        check_dependencies(args.hint, args.line_percent)
 
     valid_files, invalid_files = validate_font_files(args.fonts)
 
@@ -1013,8 +1169,9 @@ Examples:
     )
 
     success_count = 0
+    process_fn = processor.dry_run if args.dry_run else processor.process_font
     for font_path in valid_files:
-        if processor.process_font(
+        if process_fn(
             args.kern,
             font_path,
             args.name,
@@ -1024,7 +1181,10 @@ Examples:
             success_count += 1
 
     logger.info(f"\n{'='*50}")
-    logger.info(f"Processed {success_count}/{len(valid_files)} fonts successfully.")
+    if args.dry_run:
+        logger.info(f"Checked {success_count}/{len(valid_files)} fonts.")
+    else:
+        logger.info(f"Processed {success_count}/{len(valid_files)} fonts successfully.")
 
     if success_count < len(valid_files):
         sys.exit(1)
