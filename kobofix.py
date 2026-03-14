@@ -56,6 +56,13 @@ PRESETS = {
     },
 }
 
+# Known prefixes are automatically detected and stripped before applying
+# the preset's prefix. This ensures idempotent processing.
+KNOWN_PREFIXES = sorted(
+    {p["prefix"] for p in PRESETS.values() if "prefix" in p},
+    key=len, reverse=True  # longest first to avoid partial matches
+)
+
 # -------------
 # STYLE MAPPING
 # -------------
@@ -732,24 +739,45 @@ class FontProcessor:
     # Main processing method
     # ============================================================
     
-    def dry_run(self,
-        kern_mode: str,
+    def _resolve_family_name(self, font: TTFont, new_name: Optional[str], remove_prefix: Optional[str]) -> Optional[str]:
+        """
+        Determine the effective family name for the font.
+        Strips known prefixes (from presets) automatically, then applies
+        --remove-prefix and --name overrides.
+        """
+        if new_name is not None:
+            return new_name
+
+        current_family_name = font["name"].getBestFamilyName()
+        if not current_family_name:
+            return None
+
+        # Auto-strip known prefixes (NV, KF, etc.)
+        family_name = current_family_name
+        for known in KNOWN_PREFIXES:
+            if family_name.startswith(known + " "):
+                family_name = family_name[len(known + " "):]
+                break
+
+        # Also handle --remove-prefix for custom prefixes
+        if remove_prefix and current_family_name.startswith(remove_prefix + " "):
+            family_name = current_family_name[len(remove_prefix + " "):]
+
+        # Return None if nothing changed (let _get_font_metadata use the stripped name)
+        return family_name if family_name != current_family_name else None
+
+    def _analyze_changes(self,
+        font: TTFont,
         font_path: str,
-        new_name: Optional[str] = None,
-        remove_prefix: Optional[str] = None,
-        hint_mode: str = "skip",
-    ) -> bool:
+        kern_mode: str,
+        hint_mode: str,
+        metadata: FontMetadata,
+    ) -> List[str]:
         """
-        Report what would change without modifying any files.
+        Analyze what changes would be made to the font.
+        Returns a list of human-readable change descriptions.
+        This is the single source of truth for both dry-run and processing.
         """
-        logger.info(f"\nDry run: {font_path}")
-
-        try:
-            font = TTFont(font_path)
-        except Exception as e:
-            logger.error(f"  Failed to open font: {e}")
-            return False
-
         changes = []
 
         # Check WWS names
@@ -757,17 +785,6 @@ class FontProcessor:
             has_wws = any(n.nameID in (21, 22) for n in font["name"].names)
             if has_wws:
                 changes.append("Remove WWS Family/Subfamily names (ID 21, 22)")
-
-        # Determine effective name
-        effective_name = new_name
-        if new_name is None:
-            current_family_name = font["name"].getBestFamilyName()
-            if remove_prefix and current_family_name.startswith(remove_prefix + " "):
-                effective_name = current_family_name[len(remove_prefix + " "):]
-
-        metadata = self._get_font_metadata(font, font_path, effective_name)
-        if not metadata:
-            return False
 
         # Check rename
         if self.prefix:
@@ -802,15 +819,17 @@ class FontProcessor:
                 changes.append(f"Update usWeightClass: {font['OS/2'].usWeightClass} -> {os2_weight}")
 
         # Check kerning
+        # Note: As of firmware 4.45, Kobo reads GPOS kerning data correctly,
+        # but only when webkitTextRendering=optimizeLegibility is enabled.
+        # Since this setting is disabled by default, a legacy kern table is
+        # still needed for most users.
         if kern_mode in ("add-legacy-kern", "legacy-kern-only"):
             has_kern = "kern" in font
             has_gpos = "GPOS" in font
 
-            # Extract what the kern table would contain after processing
             new_pairs = self.extract_kern_pairs(font)
             if new_pairs:
                 new_items = [(tuple(k), int(v)) for k, v in new_pairs.items() if v]
-                # Apply the same prioritization/capping as add_legacy_kern
                 if len(new_items) > 10920:
                     cmap_reverse = {}
                     if "cmap" in font:
@@ -829,15 +848,12 @@ class FontProcessor:
                     total = len(new_items)
                 new_table = dict(new_items)
 
-                # Compare against existing kern table
                 if has_kern:
                     existing_pairs = {}
                     for st in font["kern"].kernTables:
                         if hasattr(st, "kernTable"):
                             existing_pairs.update(st.kernTable)
-                    if existing_pairs == new_table:
-                        pass  # kern table already matches
-                    else:
+                    if existing_pairs != new_table:
                         changes.append(f"Update kern table ({len(new_table)} pairs)")
                 else:
                     changes.append(f"Create legacy kern table from GPOS ({len(new_table)} pairs)")
@@ -856,14 +872,10 @@ class FontProcessor:
         if hint_mode == "strip":
             if self._font_has_hints(font):
                 changes.append("Strip TrueType hints")
-            else:
-                changes.append("No hints to strip")
         elif hint_mode == "overwrite":
             changes.append("Apply ttfautohint (overwrite)")
         elif hint_mode == "additive":
-            if self._font_has_hints(font):
-                changes.append("Skip ttfautohint (font already has hints)")
-            else:
+            if not self._font_has_hints(font):
                 changes.append("Apply ttfautohint (additive)")
 
         # Check line adjustment
@@ -875,14 +887,7 @@ class FontProcessor:
         if output_path != font_path:
             changes.append(f"Save as: {output_path}")
 
-        # Report
-        if changes:
-            for change in changes:
-                logger.info(f"  {change}")
-        else:
-            logger.info("  No changes needed.")
-
-        return True
+        return changes
 
     def process_font(self,
         kern_mode: str,
@@ -890,76 +895,57 @@ class FontProcessor:
         new_name: Optional[str] = None,
         remove_prefix: Optional[str] = None,
         hint_mode: str = "skip",
+        dry_run: bool = False,
     ) -> bool:
         """
-        Process a single font file.
-        This function orchestrates the entire process, calling the various
-        helper methods in the correct order.
+        Process a single font file, or report what would change in dry-run mode.
         """
-        logger.info(f"\nProcessing: {font_path}")
-        
+        label = "Dry run" if dry_run else "Processing"
+        logger.info(f"\n{label}: {font_path}")
+
         try:
             font = TTFont(font_path)
         except Exception as e:
             logger.error(f"  Failed to open font: {e}")
             return False
 
-        # Remove WWS family names (IDs 21 and 22) to prevent confusion when determining best family name
-        if font["name"]:
-            old_names_list = font["name"].names
-            names_to_remove = [21, 22]
-            new_names_list = [n for n in old_names_list if n.nameID not in names_to_remove]
-            if len(new_names_list) < len(old_names_list):
-                font["name"].names = new_names_list
-                logger.info("  Removed WWS Family Name (ID 21) and WWS Subfamily Name (ID 22).")
-        
-        # Determine the effective font name, checking for `--remove-prefix` first
-        effective_name = new_name
-        if new_name is None:
-            # If no --name argument is provided, get the font's best family name
-            current_family_name = font["name"].getBestFamilyName()
-            # If --remove-prefix is used and the name starts with the specified prefix, remove it
-            if remove_prefix and current_family_name.startswith(remove_prefix + " "):
-                effective_name = current_family_name[len(remove_prefix + " "):]
-                logger.info(f"  --remove-prefix enabled: using '{effective_name}' as the new family name.")
-        
+        effective_name = self._resolve_family_name(font, new_name, remove_prefix)
         metadata = self._get_font_metadata(font, font_path, effective_name)
         if not metadata:
             return False
-        
+
+        changes = self._analyze_changes(font, font_path, kern_mode, hint_mode, metadata)
+
+        if not changes:
+            logger.info("  No changes needed.")
+            return True
+
+        # Report changes
+        for change in changes:
+            logger.info(f"  {change}")
+
+        if dry_run:
+            return True
+
+        # Apply changes
         try:
+            # Remove WWS names
+            if font["name"]:
+                old_names_list = font["name"].names
+                new_names_list = [n for n in old_names_list if n.nameID not in (21, 22)]
+                font["name"].names = new_names_list
+
             self.rename_font(font, metadata)
             self.check_and_fix_panose(font, font_path)
             self.update_weight_metadata(font, font_path)
 
-            # Note: As of firmware 4.45, Kobo reads GPOS kerning data correctly,
-            # but only when webkitTextRendering=optimizeLegibility is enabled.
-            # Since this setting is disabled by default, a legacy kern table is
-            # still needed for most users.
             if kern_mode in ("add-legacy-kern", "legacy-kern-only"):
-                had_kern = "kern" in font
-                had_gpos = "GPOS" in font
-
                 kern_pairs = self.extract_kern_pairs(font)
                 if kern_pairs:
-                    written = self.add_legacy_kern(font, kern_pairs)
-                    if had_kern:
-                        logger.info(f"  Kerning: 'kern' table already existed, preserved {written} pairs.")
-                    else:
-                        logger.info(f"  Kerning: created 'kern' table from GPOS data with {written} pairs.")
-                else:
-                    if had_kern:
-                        logger.info("  Kerning: 'kern' table existed but was empty, no pairs written.")
-                    elif had_gpos:
-                        logger.info("  Kerning: GPOS table found but contained no kern pairs, no 'kern' table created.")
-                    else:
-                        logger.info("  Kerning: no kerning data found (no GPOS or 'kern' table), no pairs written.")
+                    self.add_legacy_kern(font, kern_pairs)
 
                 if kern_mode == "legacy-kern-only" and "GPOS" in font:
                     del font["GPOS"]
-                    logger.info("  Removed GPOS table from the font.")
-            else:
-                logger.info("  Skipping `kern` step.")
 
             if hint_mode == "strip":
                 self.strip_hints(font)
@@ -975,8 +961,7 @@ class FontProcessor:
 
             if self.line_percent != 0:
                 self.apply_line_adjustment(output_path)
-            else:
-                logger.info("  Skipping line adjustment step.")
+
             return True
         except Exception as e:
             logger.error(f"  Processing failed: {e}")
@@ -1169,14 +1154,14 @@ Examples:
     )
 
     success_count = 0
-    process_fn = processor.dry_run if args.dry_run else processor.process_font
     for font_path in valid_files:
-        if process_fn(
+        if processor.process_font(
             args.kern,
             font_path,
             args.name,
             args.remove_prefix,
             args.hint,
+            args.dry_run,
         ):
             success_count += 1
 
