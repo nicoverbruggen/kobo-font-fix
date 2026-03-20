@@ -25,6 +25,7 @@ Requirements:
 
 import sys
 import os
+import shutil
 import subprocess
 import argparse
 import logging
@@ -1021,10 +1022,10 @@ def check_dependencies(hint_mode: str, line_percent: int) -> None:
     """Check that all required external tools are available before processing."""
     missing = []
     if hint_mode in ("additive", "overwrite"):
-        if subprocess.run(["which", "ttfautohint"], capture_output=True).returncode != 0:
+        if shutil.which("ttfautohint") is None:
             missing.append("ttfautohint")
     if line_percent != 0:
-        if subprocess.run(["which", "font-line"], capture_output=True).returncode != 0:
+        if shutil.which("font-line") is None:
             missing.append("font-line")
     if missing:
         logger.error(f"Missing required dependencies: {', '.join(missing)}")
