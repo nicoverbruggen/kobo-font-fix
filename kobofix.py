@@ -981,6 +981,7 @@ class FontProcessor:
         remove_prefix: Optional[str] = None,
         hint_mode: str = "skip",
         dry_run: bool = False,
+        simplify: bool = True,
     ) -> bool:
         """
         Process a single font file, or report what would change in dry-run mode.
@@ -1035,12 +1036,13 @@ class FontProcessor:
             if hint_mode == "strip":
                 self.strip_hints(font)
 
-            if self.simplify_outlines(font):
-                logger.info("  Simplified outlines (removed overlaps)")
+            if simplify:
+                if self.simplify_outlines(font):
+                    logger.info("  Simplified outlines (removed overlaps)")
 
-            cleaned = self.clean_degenerate_contours(font)
-            if cleaned:
-                logger.info(f"  Cleaned {cleaned} zero-area contour(s)")
+                cleaned = self.clean_degenerate_contours(font)
+                if cleaned:
+                    logger.info(f"  Cleaned {cleaned} zero-area contour(s)")
 
             output_path = self._generate_output_path(font_path, metadata)
             font.save(output_path)
@@ -1094,7 +1096,7 @@ class FontProcessor:
         return os.path.join(dirname, f"{base_name}{ext.lower()}")
 
 
-def check_dependencies(hint_mode: str, line_percent: int) -> None:
+def check_dependencies(hint_mode: str, line_percent: int, simplify: bool = True) -> None:
     """Check that all required external tools are available before processing."""
     missing = []
     if hint_mode in ("additive", "overwrite"):
@@ -1103,6 +1105,11 @@ def check_dependencies(hint_mode: str, line_percent: int) -> None:
     if line_percent != 0:
         if shutil.which("font-line") is None:
             missing.append("font-line")
+    if simplify:
+        try:
+            import pathops  # noqa: F401
+        except ImportError:
+            missing.append("skia-pathops (pip install skia-pathops)")
     if missing:
         logger.error(f"Missing required dependencies: {', '.join(missing)}")
         logger.error("Please install them before running this script.")
@@ -1187,6 +1194,9 @@ Examples:
         choices=["skip", "additive", "overwrite", "strip"],
         help="Hinting mode: 'skip' does nothing, 'additive' runs ttfautohint on fonts lacking hints, "
              "'overwrite' runs ttfautohint on all fonts, 'strip' removes all TrueType hints.")
+    parser.add_argument("--no-simplify", action="store_true",
+        help="Skip outline simplification (overlap removal and degenerate contour cleanup). "
+             "Enabled by default; use this flag to disable it.")
 
     args = parser.parse_args()
 
@@ -1228,8 +1238,10 @@ Examples:
     if args.name and args.remove_prefix:
         parser.error("--name and --remove-prefix cannot be used together. Use --name to set the font name directly, or --remove-prefix to strip an existing prefix.")
 
+    simplify = not args.no_simplify
+
     if not args.dry_run:
-        check_dependencies(args.hint, args.line_percent)
+        check_dependencies(args.hint, args.line_percent, simplify)
 
     valid_files, invalid_files = validate_font_files(args.fonts)
 
@@ -1264,6 +1276,7 @@ Examples:
             args.remove_prefix,
             args.hint,
             args.dry_run,
+            simplify,
         ):
             success_count += 1
 
