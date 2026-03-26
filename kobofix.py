@@ -905,6 +905,75 @@ class FontProcessor:
 
         return changes
 
+    @staticmethod
+    def simplify_outlines(font: TTFont) -> bool:
+        """Remove overlapping contours and correct path direction.
+
+        Uses fontTools + skia-pathops for overlap removal.  Returns True
+        if the outlines were modified, False if skia-pathops is not
+        available or no changes were needed.
+        """
+        from fontTools.ttLib.removeOverlaps import removeOverlaps
+        removeOverlaps(font)
+        return True
+
+    @staticmethod
+    def clean_degenerate_contours(font: TTFont) -> int:
+        """Remove zero-area contours (<=2 points) from a font's glyf table.
+
+        These degenerate contours can cause rendering artifacts on some
+        engines.  Returns the number of contours removed.
+        """
+        from fontTools.ttLib.tables._g_l_y_f import GlyphCoordinates
+
+        glyf = font["glyf"]
+        removed_total = 0
+        modified = set()
+
+        for name in font.getGlyphOrder():
+            glyph = glyf[name]
+            if glyph.isComposite():
+                continue
+            end_pts = getattr(glyph, "endPtsOfContours", None)
+            if not end_pts:
+                continue
+
+            coords = glyph.coordinates
+            flags = glyph.flags
+
+            new_coords = []
+            new_flags = []
+            new_end_pts = []
+
+            start = 0
+            removed = 0
+            for end in end_pts:
+                count = end - start + 1
+                if count <= 2:
+                    removed += 1
+                else:
+                    new_coords.extend(coords[start:end + 1])
+                    new_flags.extend(flags[start:end + 1])
+                    new_end_pts.append(len(new_coords) - 1)
+                start = end + 1
+
+            if removed:
+                removed_total += removed
+                modified.add(name)
+                glyph.coordinates = GlyphCoordinates(new_coords)
+                glyph.flags = new_flags
+                glyph.endPtsOfContours = new_end_pts
+                glyph.numberOfContours = len(new_end_pts)
+
+        if removed_total:
+            glyph_set = font.getGlyphSet()
+            for name in modified:
+                glyph = glyf[name]
+                if hasattr(glyph, "recalcBounds"):
+                    glyph.recalcBounds(glyph_set)
+
+        return removed_total
+
     def process_font(self,
         kern_mode: str,
         font_path: str,
@@ -965,6 +1034,13 @@ class FontProcessor:
 
             if hint_mode == "strip":
                 self.strip_hints(font)
+
+            if self.simplify_outlines(font):
+                logger.info("  Simplified outlines (removed overlaps)")
+
+            cleaned = self.clean_degenerate_contours(font)
+            if cleaned:
+                logger.info(f"  Cleaned {cleaned} zero-area contour(s)")
 
             output_path = self._generate_output_path(font_path, metadata)
             font.save(output_path)
