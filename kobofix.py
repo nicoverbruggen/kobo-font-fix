@@ -8,6 +8,7 @@ Processes TrueType fonts to improve compatibility with Kobo e-readers:
 - Validating and correcting PANOSE metadata based on font style
 - Updating font weight metadata (OS/2 usWeightClass)
 - Adjusting line spacing via font-line
+- Simplifying outlines w/ skia-pathops
 - Kerning: extracting GPOS pairs (Format 1, Format 2, and Extension lookups)
   into a legacy kern table, prioritized by Unicode range to fit within
   format 0 size constraints
@@ -20,6 +21,7 @@ configured via individual flags. Run with -h for usage details.
 Requirements:
 - fontTools (pip install fonttools)
 - font-line (pip install font-line)
+- skia-pathops (pip install skia-pathops)
 - ttfautohint (optional, for --hint additive/overwrite)
 """
 
@@ -47,12 +49,14 @@ PRESETS = {
         "line_percent": 20,
         "kern": "skip",
         "hint": "skip",
+        "outline": "skip",
     },
     "kf": {
         "prefix": "KF",
         "line_percent": 0,
         "kern": "add-legacy-kern",
         "hint": "skip",
+        "outline": "apply",
         "remove_prefix": "NV",
     },
 }
@@ -981,7 +985,7 @@ class FontProcessor:
         remove_prefix: Optional[str] = None,
         hint_mode: str = "skip",
         dry_run: bool = False,
-        simplify: bool = True,
+        outline_mode: str = "apply",
     ) -> bool:
         """
         Process a single font file, or report what would change in dry-run mode.
@@ -1036,7 +1040,7 @@ class FontProcessor:
             if hint_mode == "strip":
                 self.strip_hints(font)
 
-            if simplify:
+            if outline_mode == "apply":
                 if self.simplify_outlines(font):
                     logger.info("  Simplified outlines (removed overlaps)")
 
@@ -1096,7 +1100,7 @@ class FontProcessor:
         return os.path.join(dirname, f"{base_name}{ext.lower()}")
 
 
-def check_dependencies(hint_mode: str, line_percent: int, simplify: bool = True) -> None:
+def check_dependencies(hint_mode: str, line_percent: int, outline_mode: str = "apply") -> None:
     """Check that all required external tools are available before processing."""
     missing = []
     if hint_mode in ("additive", "overwrite"):
@@ -1105,7 +1109,7 @@ def check_dependencies(hint_mode: str, line_percent: int, simplify: bool = True)
     if line_percent != 0:
         if shutil.which("font-line") is None:
             missing.append("font-line")
-    if simplify:
+    if outline_mode == "apply":
         try:
             import pathops  # noqa: F401
         except ImportError:
@@ -1153,9 +1157,9 @@ def main():
         epilog=f"""
 Presets:
   nv    Prepare fonts for the ebook-fonts repository. Applies NV prefix,
-        20%% line spacing. Does not modify kerning or hinting.
+        20%% line spacing. Does not modify kerning, hinting, or outlines.
   kf    Prepare KF fonts from NV fonts. Applies KF prefix, replaces NV
-        prefix, adds legacy kern table. No line spacing changes.
+        prefix, adds legacy kern table, simplifies outlines. No line spacing changes.
 
 Examples:
   Using a preset:
@@ -1163,7 +1167,7 @@ Examples:
   %(prog)s --preset kf *.ttf
 
   Custom processing:
-  %(prog)s --prefix KF --name="Fonty" --line-percent 20 --kern add-legacy-kern *.ttf
+  %(prog)s --prefix KF --name="Fonty" --line-percent 20 --kern add-legacy-kern --outline apply *.ttf
 
   If no preset or flags are provided, you will be prompted to choose a preset.
         """
@@ -1194,9 +1198,10 @@ Examples:
         choices=["skip", "additive", "overwrite", "strip"],
         help="Hinting mode: 'skip' does nothing, 'additive' runs ttfautohint on fonts lacking hints, "
              "'overwrite' runs ttfautohint on all fonts, 'strip' removes all TrueType hints.")
-    parser.add_argument("--no-simplify", action="store_true",
-        help="Skip outline simplification (overlap removal and degenerate contour cleanup). "
-             "Enabled by default; use this flag to disable it.")
+    parser.add_argument("--outline", type=str,
+        choices=["apply", "skip"],
+        help="Outline mode: 'apply' removes overlaps and cleans degenerate contours (requires skia-pathops), "
+             "'skip' leaves outlines untouched.")
 
     args = parser.parse_args()
 
@@ -1204,7 +1209,7 @@ Examples:
         logging.getLogger().setLevel(logging.DEBUG)
 
     # Determine which flags were explicitly set by the user
-    manual_flags = {k for k in ("prefix", "line_percent", "kern", "hint", "remove_prefix", "name")
+    manual_flags = {k for k in ("prefix", "line_percent", "kern", "hint", "outline", "remove_prefix", "name")
                     if getattr(args, k) is not None}
 
     # If no preset and no manual flags, prompt the user to choose a preset
@@ -1234,14 +1239,14 @@ Examples:
         args.kern = "skip"
     if args.hint is None:
         args.hint = "skip"
+    if args.outline is None:
+        args.outline = "apply"
 
     if args.name and args.remove_prefix:
         parser.error("--name and --remove-prefix cannot be used together. Use --name to set the font name directly, or --remove-prefix to strip an existing prefix.")
 
-    simplify = not args.no_simplify
-
     if not args.dry_run:
-        check_dependencies(args.hint, args.line_percent, simplify)
+        check_dependencies(args.hint, args.line_percent, args.outline)
 
     valid_files, invalid_files = validate_font_files(args.fonts)
 
@@ -1276,7 +1281,7 @@ Examples:
             args.remove_prefix,
             args.hint,
             args.dry_run,
-            simplify,
+            args.outline,
         ):
             success_count += 1
 

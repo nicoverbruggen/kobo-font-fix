@@ -61,7 +61,7 @@ With the Kobo Fix (KF) preset, the script will:
 3. **Modify the internal name of the font.** The `KF` prefix is applied (replacing the `NV` prefix if present). A custom name can also be specified with `--name`.
 4. **PANOSE metadata is checked and fixed.** Sometimes, the PANOSE information does not match the font style. This is often an oversight but it causes issues on Kobo devices, so this fixes that.
 5. **Font weight metadata is updated.** There's other metadata that is part of the font that reflects the weight of the font. In case this information needs to be modified, it is adjusted.
-6. **Outlines are simplified.** Overlapping contours are merged and degenerate (zero-area) contours are removed. This improves rendering consistency on e-ink displays. Can be disabled with `--no-simplify`.
+6. **Outlines are simplified.** Overlapping contours are merged and degenerate (zero-area) contours are removed. This improves rendering consistency on e-ink displays. Can be disabled with `--outline skip`.
 7. **Kern pairs from the GPOS table are copied to the legacy `kern` table.** This only applies to fonts that have a GPOS table, which is used for kerning in modern fonts.
 
 Other presets and flags can change this behavior. For example, the NV preset applies 20% line spacing and skips kerning, and the `--hint` flag can be used to control hinting. 
@@ -81,7 +81,7 @@ You can customize what the script does. For more information, consult:
 Given the right arguments, you can:
 - Control kerning behavior (`--kern`): add a legacy kern table, remove GPOS after extraction, or skip entirely (default)
 - Control hinting (`--hint`): strip hints, apply ttfautohint to unhinted fonts, apply ttfautohint to all fonts, or skip (default)
-- Disable outline simplification (`--no-simplify`)
+- Control outline simplification (`--outline`): apply overlap removal and degenerate contour cleanup, or skip entirely (default: apply)
 - Use a custom name for a font
 - Use a custom name for the prefix
 - Adjust the percentage of the `font-line` setting
@@ -95,7 +95,7 @@ The script includes presets for common workflows. If no preset or flags are prov
 
 ### NV preset
 
-Prepares fonts for the [ebook-fonts](https://github.com/nicoverbruggen/ebook-fonts) repository. Applies the NV prefix and 20% line spacing. Does not modify kerning or hinting.
+Prepares fonts for the [ebook-fonts](https://github.com/nicoverbruggen/ebook-fonts) repository. Applies the NV prefix and 20% line spacing. Does not modify kerning, hinting, or outlines.
 
 ```bash
 ./kobofix.py --preset nv *.ttf
@@ -109,7 +109,7 @@ You can override individual settings, for example to use relaxed spacing:
 
 ### KF preset
 
-Prepares KF fonts from NV fonts for use on Kobo devices. Applies the KF prefix, replaces the NV prefix, and adds a legacy kern table. No line spacing changes are made (since NV fonts already have those applied).
+Prepares KF fonts from NV fonts for use on Kobo devices. Applies the KF prefix, replaces the NV prefix, adds a legacy kern table, and simplifies outlines. No line spacing changes are made (since NV fonts already have those applied).
 
 ```bash
 ./kobofix.py --preset kf *.ttf
