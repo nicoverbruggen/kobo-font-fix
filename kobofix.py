@@ -1243,7 +1243,8 @@ Examples:
         args.outline = "apply"
 
     if args.name and args.remove_prefix:
-        parser.error("--name and --remove-prefix cannot be used together. Use --name to set the font name directly, or --remove-prefix to strip an existing prefix.")
+        logger.warning("--name and --remove-prefix were both specified. --name takes precedence; --remove-prefix will be ignored.")
+        args.remove_prefix = None
 
     if not args.dry_run:
         check_dependencies(args.hint, args.line_percent, args.outline)
