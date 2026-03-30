@@ -694,15 +694,25 @@ class FontProcessor:
             logger.info("  No TrueType hints found to remove.")
 
     def apply_ttfautohint(self, font_path: str) -> bool:
-        """Run ttfautohint on a saved font file, replacing it in-place."""
+        """Run ttfautohint on a saved font file, replacing it in-place.
+
+        Uses natural stem widths (--stem-width-mode=nss) for Kobo's FreeType
+        grayscale renderer, which produces less distortion than the default
+        strong grid-fitting.
+        """
         try:
             hinted_path = font_path + ".hinted"
             subprocess.run(
-                ["ttfautohint", font_path, hinted_path],
+                [
+                    "ttfautohint",
+                    "--stem-width-mode=nss",
+                    font_path,
+                    hinted_path,
+                ],
                 check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
             )
             os.replace(hinted_path, font_path)
-            logger.info("  Applied ttfautohint.")
+            logger.info("  Applied ttfautohint (natural stem widths).")
             return True
         except subprocess.CalledProcessError as e:
             logger.warning(f"  ttfautohint failed: {e}")
@@ -998,6 +1008,14 @@ class FontProcessor:
         except Exception as e:
             logger.error(f"  Failed to open font: {e}")
             return False
+
+        # Report hinting status
+        has_hints = self._font_has_hints(font)
+        hint_tables = [t for t in ("fpgm", "prep", "cvt ") if t in font]
+        if has_hints:
+            logger.info(f"  Hinting: present (tables: {', '.join(hint_tables) if hint_tables else 'glyph-level only'})")
+        else:
+            logger.info(f"  Hinting: none")
 
         effective_name = self._resolve_family_name(font, new_name, remove_prefix)
         metadata = self._get_font_metadata(font, font_path, effective_name)
