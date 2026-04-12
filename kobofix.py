@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import argparse
 import logging
+import string
 from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
@@ -86,6 +87,25 @@ STYLE_MAP = {
 # Configure logging for clear output
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
+
+ASCII_PRIORITY_CODEPOINTS = {
+    ord(ch) for ch in (string.ascii_letters + string.digits + string.punctuation)
+}
+TYPOGRAPHIC_PRIORITY_CODEPOINTS = {
+    0x00AB,  # LEFT-POINTING DOUBLE ANGLE QUOTATION MARK
+    0x00BB,  # RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK
+    0x2013,  # EN DASH
+    0x2014,  # EM DASH
+    0x2018,  # LEFT SINGLE QUOTATION MARK
+    0x2019,  # RIGHT SINGLE QUOTATION MARK
+    0x201A,  # SINGLE LOW-9 QUOTATION MARK
+    0x201C,  # LEFT DOUBLE QUOTATION MARK
+    0x201D,  # RIGHT DOUBLE QUOTATION MARK
+    0x201E,  # DOUBLE LOW-9 QUOTATION MARK
+    0x2026,  # HORIZONTAL ELLIPSIS
+    0x2039,  # SINGLE LEFT-POINTING ANGLE QUOTATION MARK
+    0x203A,  # SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
+}
 
 
 @dataclass
@@ -408,14 +428,18 @@ class FontProcessor:
         """
         cp = cmap_reverse.get(glyph_name)
         if cp is None:
-            return 4  # unmapped glyphs (ligatures, alternates, etc.)
+            return 5  # unmapped glyphs (ligatures, alternates, etc.)
+        if cp in ASCII_PRIORITY_CODEPOINTS:
+            return 0  # ASCII letters, digits, and punctuation
+        if cp in TYPOGRAPHIC_PRIORITY_CODEPOINTS:
+            return 1  # smart quotes, dashes, ellipsis, guillemets
         if cp <= 0x007F:
-            return 0  # Basic Latin (A-Z, a-z, digits, punctuation)
+            return 2  # other Basic Latin codepoints
         if cp <= 0x00FF:
-            return 1  # Latin-1 Supplement (accented chars, common symbols)
+            return 3  # Latin-1 Supplement (accented chars, common symbols)
         if cp <= 0x024F:
-            return 2  # Latin Extended-A and B
-        return 3      # everything else
+            return 4  # Latin Extended-A and B
+        return 5      # everything else
 
     @staticmethod
     def add_legacy_kern(font: TTFont, kern_pairs: Dict[Tuple[str, str], int]) -> int:
@@ -432,9 +456,11 @@ class FontProcessor:
         When a font has more pairs than this (common with class-based GPOS
         kerning, which can expand to 100k+ individual pairs), we prioritize
         by Unicode range so the most commonly encountered pairs are kept:
-          - Basic Latin (U+0000-007F): English, digits, punctuation
-          - Latin-1 Supplement (U+0080-00FF): Western European accented chars
-          - Latin Extended-A/B (U+0100-024F): Central/Eastern European chars
+          - ASCII letters, digits, and punctuation
+          - Common typography punctuation (smart quotes, dashes, ellipsis, guillemets)
+          - Other Basic Latin codepoints (for example control-space block)
+          - Latin-1 Supplement (accented chars, common symbols)
+          - Latin Extended-A/B (Central/Eastern European chars)
           - Everything else and unmapped glyphs (ligatures, alternates)
 
         This means all English kerning is preserved, most Western European

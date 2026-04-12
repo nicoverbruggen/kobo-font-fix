@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import types
 import unittest
+import inspect
 
 from fontTools.ttLib import TTFont, newTable
 
@@ -51,7 +52,11 @@ class KobofixUnitTests(unittest.TestCase):
             ],
         )
 
-        pairs = processor._extract_format2_pairs(font, subtable)
+        params = tuple(inspect.signature(processor._extract_format2_pairs).parameters)
+        if len(params) == 2:
+            pairs = processor._extract_format2_pairs(font, subtable)
+        else:
+            pairs = processor._extract_format2_pairs(subtable)
 
         self.assertEqual(pairs[("A", "B")], -40)
         self.assertEqual(pairs[("A", "C")], -80)
@@ -137,6 +142,52 @@ class KobofixUnitTests(unittest.TestCase):
         resolved = processor._resolve_family_name(font, new_name=None, remove_prefix=None)
 
         self.assertEqual(resolved, "Readerly")
+
+    def test_glyph_priority_prefers_ascii_letters_digits_and_punctuation(self) -> None:
+        cmap_reverse = {
+            "A": ord("A"),
+            "nine": ord("9"),
+            "exclam": ord("!"),
+            "space": ord(" "),
+            "Aacute": 0x00C1,
+            "Ccaron": 0x010C,
+        }
+
+        self.assertLess(
+            FontProcessor._glyph_priority("A", cmap_reverse),
+            FontProcessor._glyph_priority("space", cmap_reverse),
+        )
+        self.assertLess(
+            FontProcessor._glyph_priority("nine", cmap_reverse),
+            FontProcessor._glyph_priority("Aacute", cmap_reverse),
+        )
+        self.assertLess(
+            FontProcessor._glyph_priority("exclam", cmap_reverse),
+            FontProcessor._glyph_priority("Ccaron", cmap_reverse),
+        )
+
+    def test_glyph_priority_prefers_typographic_punctuation_over_extended_latin(self) -> None:
+        cmap_reverse = {
+            "quotedblleft": 0x201C,
+            "quotedblright": 0x201D,
+            "emdash": 0x2014,
+            "ellipsis": 0x2026,
+            "Aacute": 0x00C1,
+            "Ccaron": 0x010C,
+        }
+
+        self.assertLess(
+            FontProcessor._glyph_priority("quotedblleft", cmap_reverse),
+            FontProcessor._glyph_priority("Aacute", cmap_reverse),
+        )
+        self.assertLess(
+            FontProcessor._glyph_priority("emdash", cmap_reverse),
+            FontProcessor._glyph_priority("Ccaron", cmap_reverse),
+        )
+        self.assertEqual(
+            FontProcessor._glyph_priority("quotedblright", cmap_reverse),
+            FontProcessor._glyph_priority("ellipsis", cmap_reverse),
+        )
 
 
 if __name__ == "__main__":
