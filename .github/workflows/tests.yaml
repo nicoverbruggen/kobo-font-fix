@@ -1,0 +1,19 @@
+name: Run tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/nicoverbruggen/fntbld-oci:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run test suite
+        run: python3 -m unittest discover -s tests -v

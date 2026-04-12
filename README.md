@@ -91,6 +91,18 @@ Given the right arguments, you can:
 
 For debugging purposes, you can run the script with the `--verbose` flag.
 
+## Testing
+
+The repository now includes a `unittest` suite that covers both targeted font-table logic and end-to-end processing against real Readerly fonts.
+
+Run the full suite with:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+On first run, the integration tests download the latest `Readerly.zip` release into `./tests/fixtures` and reuse those extracted fonts on later runs.
+
 ## Presets
 
 The script includes presets for common workflows. If no preset or flags are provided, you will be prompted to choose one.

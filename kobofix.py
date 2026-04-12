@@ -179,7 +179,7 @@ class FontProcessor:
                     if name_record.string != encoded_name:
                         name_record.string = encoded_name
                         updated_count += 1
-                elif name_record.platformID == 3:  # Windows
+                elif name_record.platformID in (0, 3):  # Unicode and Windows
                     encoded_name = new_name.encode('utf-16-be', 'ignore')
                     if name_record.string != encoded_name:
                         name_record.string = encoded_name
@@ -300,7 +300,7 @@ class FontProcessor:
                         pairs[key] = kern_value
         return pairs
     
-    def _extract_format2_pairs(self, subtable) -> Dict[Tuple[str, str], int]:
+    def _extract_format2_pairs(self, font: TTFont, subtable) -> Dict[Tuple[str, str], int]:
         """Extract kerning pairs from PairPos Format 2 (class-based)."""
         pairs = {}
         coverage = getattr(subtable, "Coverage", None)
@@ -321,6 +321,9 @@ class FontProcessor:
         right_by_class = defaultdict(list)
         for glyph, class_idx in class2_map.items():
             right_by_class[class_idx].append(glyph)
+        for glyph in font.getGlyphOrder():
+            if glyph not in class2_map:
+                right_by_class[0].append(glyph)
 
         for class1_idx, class1_record in enumerate(class1_records):
             left_glyphs = left_by_class.get(class1_idx, [])
@@ -388,7 +391,7 @@ class FontProcessor:
                         if fmt == 1:
                             extracted = self._extract_format1_pairs(subtable)
                         elif fmt == 2:
-                            extracted = self._extract_format2_pairs(subtable)
+                            extracted = self._extract_format2_pairs(font, subtable)
                         else:
                             continue
                         for key, value in extracted.items():
@@ -514,10 +517,10 @@ class FontProcessor:
 
         # Update Typographic Family
         self._set_name_records(font, 16, adjusted_family_name)
-        # Update Preferred Subfamily
+        # Update Typographic Subfamily
         self._set_name_records(font, 17, metadata.style_name)
-        # Update Preferred Family
-        self._set_name_records(font, 18, adjusted_family_name)
+        # Update Compatible Full Name
+        self._set_name_records(font, 18, adjusted_full_name)
 
         # Update Unique ID (ID 3)
         try:
@@ -800,7 +803,7 @@ class FontProcessor:
         changes = []
 
         # Check WWS names
-        if font["name"]:
+        if "name" in font and font["name"]:
             has_wws = any(n.nameID in (21, 22) for n in font["name"].names)
             if has_wws:
                 changes.append("Remove WWS Family/Subfamily names (ID 21, 22)")
@@ -1038,7 +1041,7 @@ class FontProcessor:
         # Apply changes
         try:
             # Remove WWS names
-            if font["name"]:
+            if "name" in font and font["name"]:
                 old_names_list = font["name"].names
                 new_names_list = [n for n in old_names_list if n.nameID not in (21, 22)]
                 font["name"].names = new_names_list

@@ -1,2 +1,4 @@
 *.ttf
 *.otf
+__pycache__/
+tests/__pycache__/
