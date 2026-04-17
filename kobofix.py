@@ -3,6 +3,8 @@
 Font processing utility for Kobo e-readers.
 
 Processes TrueType fonts to improve compatibility with Kobo e-readers:
+- Converting OTF (CFF) inputs to TTF (glyf) first, so all downstream steps
+  operate on a true TrueType font with no CFF metadata left behind
 - Renaming fonts with a configurable prefix and updating internal metadata
   (name table, CFF, post table, PS name)
 - Validating and correcting PANOSE metadata based on font style
@@ -638,6 +640,65 @@ class FontProcessor:
                 logger.debug(f"  PostScript 'post' weight updated to '{ps_weight}'.")
 
     # ============================================================
+    # Style flag methods
+    # ============================================================
+
+    @staticmethod
+    def _style_flags(style_name: str) -> Tuple[bool, bool, bool]:
+        """Return (is_bold, is_italic, is_regular) derived from style_name."""
+        is_italic = "Italic" in style_name
+        is_bold = "Bold" in style_name
+        is_regular = style_name == "Regular"
+        return is_bold, is_italic, is_regular
+
+    @staticmethod
+    def _expected_style_flags(style_name: str) -> Tuple[int, int]:
+        """Return the expected (fsSelection, macStyle) bit masks for a style.
+
+        Only the style-related bits are returned; callers must merge these
+        into existing values while clearing the style bits they manage.
+        """
+        is_bold, is_italic, is_regular = FontProcessor._style_flags(style_name)
+        fs = 0
+        if is_italic: fs |= 0x01     # ITALIC
+        if is_bold:   fs |= 0x20     # BOLD
+        if is_regular: fs |= 0x40    # REGULAR
+
+        ms = 0
+        if is_bold:   ms |= 0x01
+        if is_italic: ms |= 0x02
+        return fs, ms
+
+    def update_style_flags(self, font: TTFont, filename: str) -> None:
+        """Synchronize OS/2.fsSelection and head.macStyle with the style_name.
+
+        Some source fonts ship with style-related bits that disagree with
+        the name table (for example an italic weight with the italic bits
+        cleared and the regular bit set).  Once the name table is rewritten
+        to reflect the filename-derived style, the binary flags must be
+        brought into agreement — otherwise renderers that trust fsSelection
+        or macStyle instead of the name table will treat the font wrongly.
+        """
+        style_name, _ = self._get_style_from_filename(filename)
+        expected_fs, expected_ms = self._expected_style_flags(style_name)
+        style_fs_mask = 0x01 | 0x20 | 0x40  # italic | bold | regular
+        style_ms_mask = 0x01 | 0x02          # bold | italic
+
+        if "OS/2" in font and hasattr(font["OS/2"], "fsSelection"):
+            current = font["OS/2"].fsSelection
+            new_value = (current & ~style_fs_mask) | expected_fs
+            if current != new_value:
+                font["OS/2"].fsSelection = new_value
+                logger.debug(f"  OS/2 fsSelection: 0x{current:04x} -> 0x{new_value:04x}")
+
+        if "head" in font and hasattr(font["head"], "macStyle"):
+            current = font["head"].macStyle
+            new_value = (current & ~style_ms_mask) | expected_ms
+            if current != new_value:
+                font["head"].macStyle = new_value
+                logger.debug(f"  head macStyle: 0x{current:04x} -> 0x{new_value:04x}")
+
+    # ============================================================
     # PANOSE methods
     # ============================================================
     
@@ -820,6 +881,7 @@ class FontProcessor:
         kern_mode: str,
         hint_mode: str,
         metadata: FontMetadata,
+        is_otf: bool = False,
     ) -> List[str]:
         """
         Analyze what changes would be made to the font.
@@ -827,6 +889,9 @@ class FontProcessor:
         This is the single source of truth for both dry-run and processing.
         """
         changes = []
+
+        if is_otf:
+            changes.append("Convert OTF (CFF) to TTF (glyf, quadratic outlines)")
 
         # Check WWS names
         if "name" in font and font["name"]:
@@ -867,6 +932,22 @@ class FontProcessor:
         if "OS/2" in font and hasattr(font["OS/2"], "usWeightClass"):
             if font["OS/2"].usWeightClass != os2_weight:
                 changes.append(f"Update usWeightClass: {font['OS/2'].usWeightClass} -> {os2_weight}")
+
+        # Check style flags (fsSelection / macStyle)
+        style_name, _ = self._get_style_from_filename(font_path)
+        expected_fs, expected_ms = self._expected_style_flags(style_name)
+        style_fs_mask = 0x01 | 0x20 | 0x40
+        style_ms_mask = 0x01 | 0x02
+        if "OS/2" in font and hasattr(font["OS/2"], "fsSelection"):
+            current_fs = font["OS/2"].fsSelection
+            new_fs = (current_fs & ~style_fs_mask) | expected_fs
+            if current_fs != new_fs:
+                changes.append(f"Update fsSelection: 0x{current_fs:04x} -> 0x{new_fs:04x} (style bits)")
+        if "head" in font and hasattr(font["head"], "macStyle"):
+            current_ms = font["head"].macStyle
+            new_ms = (current_ms & ~style_ms_mask) | expected_ms
+            if current_ms != new_ms:
+                changes.append(f"Update macStyle: 0x{current_ms:04x} -> 0x{new_ms:04x} (style bits)")
 
         # Check kerning
         # Note: As of firmware 4.45, Kobo reads GPOS kerning data correctly,
@@ -1038,6 +1119,10 @@ class FontProcessor:
             logger.error(f"  Failed to open font: {e}")
             return False
 
+        is_otf = "CFF " in font
+        if is_otf:
+            logger.info("  Source: OTF (CFF outlines, will be converted to TTF)")
+
         # Report hinting status
         has_hints = self._font_has_hints(font)
         hint_tables = [t for t in ("fpgm", "prep", "cvt ") if t in font]
@@ -1051,7 +1136,7 @@ class FontProcessor:
         if not metadata:
             return False
 
-        changes = self._analyze_changes(font, font_path, kern_mode, hint_mode, metadata)
+        changes = self._analyze_changes(font, font_path, kern_mode, hint_mode, metadata, is_otf)
 
         if not changes:
             logger.info("  No changes needed.")
@@ -1066,6 +1151,12 @@ class FontProcessor:
 
         # Apply changes
         try:
+            # OTF→TTF must run first so every subsequent step operates on
+            # a real TrueType font (no CFF Name INDEX, no cubic outlines).
+            if is_otf:
+                otf_to_ttf(font)
+                logger.info("  Converted CFF outlines to TrueType (quadratic)")
+
             # Remove WWS names
             if "name" in font and font["name"]:
                 old_names_list = font["name"].names
@@ -1075,6 +1166,7 @@ class FontProcessor:
             self.rename_font(font, metadata)
             self.check_and_fix_panose(font, font_path)
             self.update_weight_metadata(font, font_path)
+            self.update_style_flags(font, font_path)
 
             if kern_mode in ("add-legacy-kern", "legacy-kern-only"):
                 kern_pairs = self.extract_kern_pairs(font)
@@ -1144,7 +1236,71 @@ class FontProcessor:
         else:
             base_name = f"{metadata.family_name.replace(' ', '_')}{style_part}"
 
-        return os.path.join(dirname, f"{base_name}{ext.lower()}")
+        out_ext = ".ttf" if ext.lower() == ".otf" else ext.lower()
+        return os.path.join(dirname, f"{base_name}{out_ext}")
+
+
+def otf_to_ttf(font: TTFont, max_err: float = 1.0) -> None:
+    """Convert a CFF (OTF) font to TrueType (glyf) in place.
+
+    Cubic Bézier outlines from the CFF table are approximated as quadratic
+    curves via Cu2QuPen (max_err is in font units, 1.0 is imperceptible at
+    reading sizes).  The CFF table is then removed, leaving a genuine TTF
+    with no residual Name INDEX metadata.
+    """
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    from fontTools.pens.cu2quPen import Cu2QuPen
+
+    assert "CFF " in font, "Font does not have a CFF table"
+
+    glyph_order = font.getGlyphOrder()
+    glyph_set = font.getGlyphSet()
+
+    glyphs = {}
+    for name in glyph_order:
+        tt_pen = TTGlyphPen(None)
+        cu2qu_pen = Cu2QuPen(tt_pen, max_err=max_err, reverse_direction=True)
+        glyph_set[name].draw(cu2qu_pen)
+        glyphs[name] = tt_pen.glyph()
+
+    glyf_table = newTable("glyf")
+    glyf_table.glyphs = glyphs
+    glyf_table.glyphOrder = glyph_order
+    font["glyf"] = glyf_table
+    font["loca"] = newTable("loca")
+
+    font.sfntVersion = "\x00\x01\x00\x00"
+
+    for tag in ("CFF ", "VORG"):
+        if tag in font:
+            del font[tag]
+
+    # post v2.0 stores glyph names; CFF fonts typically ship v3.0 (no names),
+    # so we have to seed extraNames/mapping when switching formats.
+    if "post" in font:
+        post = font["post"]
+        post.formatType = 2.0
+        if not hasattr(post, "extraNames"):
+            post.extraNames = []
+        if not hasattr(post, "mapping"):
+            post.mapping = {}
+
+    # TTF requires maxp v1.0 with hinting-related fields populated.  The
+    # converted font has no hints, so zero is a safe value for everything
+    # except the composite-depth/element counts (which fontTools recomputes
+    # from the glyf table during save).
+    if "maxp" in font:
+        maxp = font["maxp"]
+        maxp.tableVersion = 0x00010000
+        maxp.maxZones = 1
+        maxp.maxTwilightPoints = 0
+        maxp.maxStorage = 0
+        maxp.maxFunctionDefs = 0
+        maxp.maxInstructionDefs = 0
+        maxp.maxStackElements = 0
+        maxp.maxSizeOfInstructions = 0
+        maxp.maxComponentElements = 0
+        maxp.maxComponentDepth = 0
 
 
 def check_dependencies(hint_mode: str, line_percent: int, outline_mode: str = "apply") -> None:
@@ -1176,8 +1332,8 @@ def validate_font_files(font_paths: List[str]) -> Tuple[List[str], List[str]]:
         if not os.path.isfile(path):
             logger.warning(f"File not found: {path}")
             continue
-        if not path.lower().endswith(".ttf"):
-            logger.error(f"Unsupported file type: {path} (only .ttf files are supported)")
+        if not path.lower().endswith((".ttf", ".otf")):
+            logger.error(f"Unsupported file type: {path} (only .ttf and .otf files are supported)")
             invalid_files.append(os.path.basename(path))
             continue
         
