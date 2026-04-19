@@ -514,6 +514,87 @@ class FontProcessor:
         return len(items)
 
     # ============================================================
+    # OT-layout normalization
+    # ============================================================
+
+    # Map GSUB/GPOS subtable types (LookupType, Format) to the attribute
+    # name of the array that runs parallel to Coverage.glyphs.  Subtables
+    # not listed here either have no parallel array (e.g. Single Format 1,
+    # where every covered glyph shares the same value) or use class-based
+    # indexing that is independent of Coverage order (e.g. Pair Format 2).
+    _PARALLEL_ARRAYS = {
+        ("GSUB", 1, 2): "Substitute",
+        ("GSUB", 2, 1): "Sequence",
+        ("GSUB", 3, 1): "AlternateSet",
+        ("GSUB", 4, 1): "LigatureSet",
+        ("GPOS", 1, 2): "Value",
+        ("GPOS", 2, 1): "PairSet",
+        ("GPOS", 3, 1): "EntryExitRecord",
+    }
+
+    @classmethod
+    def _sort_coverage_subtable(cls, sub, lookup_type: int, table_tag: str, font: TTFont) -> bool:
+        """Sort Coverage.glyphs on one subtable, permuting its parallel array.
+
+        Returns True if the subtable was modified.  Extension lookups
+        (GSUB Type 7, GPOS Type 9) are unwrapped so the inner subtable is
+        handled instead.
+        """
+        # Unwrap Extension lookups
+        if lookup_type in (7, 9) and hasattr(sub, "ExtSubTable"):
+            inner_type = getattr(sub, "ExtensionLookupType", None)
+            if inner_type:
+                return cls._sort_coverage_subtable(sub.ExtSubTable, inner_type, table_tag, font)
+            return False
+
+        cov = getattr(sub, "Coverage", None)
+        if cov is None or not hasattr(cov, "glyphs"):
+            return False
+
+        glyph_ids = [font.getGlyphID(g) for g in cov.glyphs]
+        if glyph_ids == sorted(glyph_ids):
+            return False
+
+        fmt = getattr(sub, "Format", None)
+        parallel_attr = cls._PARALLEL_ARRAYS.get((table_tag, lookup_type, fmt))
+
+        # Compute permutation that sorts glyph IDs ascending
+        order = sorted(range(len(cov.glyphs)), key=glyph_ids.__getitem__)
+        cov.glyphs = [cov.glyphs[i] for i in order]
+
+        if parallel_attr and hasattr(sub, parallel_attr):
+            arr = getattr(sub, parallel_attr)
+            if arr is not None and len(arr) == len(order):
+                setattr(sub, parallel_attr, [arr[i] for i in order])
+
+        return True
+
+    @classmethod
+    def normalize_coverage(cls, font: TTFont) -> int:
+        """Sort every Coverage table in GSUB/GPOS (and permute its parallel
+        array), so renderers that binary-search Coverage get correct results.
+
+        Returns the number of subtables that were fixed.  Lenient shapers
+        (HarfBuzz, WebKit) accept unsorted Coverage, but strict consumers
+        on desktop or legacy platforms can silently drop kern pairs or
+        ligatures without this.
+        """
+        fixed = 0
+        for tag in ("GSUB", "GPOS"):
+            if tag not in font:
+                continue
+            table = font[tag].table
+            lookup_list = getattr(table, "LookupList", None)
+            if lookup_list is None:
+                continue
+            for lookup in lookup_list.Lookup:
+                lt = lookup.LookupType
+                for sub in lookup.SubTable:
+                    if cls._sort_coverage_subtable(sub, lt, tag, font):
+                        fixed += 1
+        return fixed
+
+    # ============================================================
     # Name table methods
     # ============================================================
     
@@ -892,6 +973,28 @@ class FontProcessor:
 
         if is_otf:
             changes.append("Convert OTF (CFF) to TTF (glyf, quadratic outlines)")
+
+        # Check Coverage sort order in GSUB/GPOS
+        unsorted_cov = 0
+        for tag in ("GSUB", "GPOS"):
+            if tag not in font:
+                continue
+            lookup_list = getattr(font[tag].table, "LookupList", None)
+            if lookup_list is None:
+                continue
+            for lookup in lookup_list.Lookup:
+                for sub in lookup.SubTable:
+                    target = sub
+                    if lookup.LookupType in (7, 9) and hasattr(sub, "ExtSubTable"):
+                        target = sub.ExtSubTable
+                    cov = getattr(target, "Coverage", None)
+                    if cov is None or not hasattr(cov, "glyphs"):
+                        continue
+                    ids = [font.getGlyphID(g) for g in cov.glyphs]
+                    if ids != sorted(ids):
+                        unsorted_cov += 1
+        if unsorted_cov:
+            changes.append(f"Sort {unsorted_cov} unsorted Coverage table(s) in GSUB/GPOS")
 
         # Check WWS names
         if "name" in font and font["name"]:
