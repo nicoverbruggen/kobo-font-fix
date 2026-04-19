@@ -17,12 +17,11 @@ jobs:
       - name: Run test suite
         run: python3 -m unittest discover -s tests -v
 
-      - name: Download latest Readerly font
+      - name: Prepare test fonts
         run: |
-          apt-get update && apt-get install -y curl jq
-          LATEST_TAG=$(curl -s https://api.github.com/repos/nicoverbruggen/readerly/releases/latest | jq -r '.tag_name')
-          curl -L -o Readerly.zip "https://github.com/nicoverbruggen/readerly/releases/download/${LATEST_TAG}/Readerly.zip"
-          unzip Readerly.zip -d fonts
+          mkdir -p fonts
+          cp tests/fixtures/Readerly.zip .
+          unzip -o Readerly.zip -d fonts
 
       - name: Dry run NV preset
         run: python3 kobofix.py --preset nv --dry-run fonts/*.ttf
