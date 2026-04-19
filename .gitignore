@@ -2,3 +2,4 @@
 *.otf
 __pycache__/
 tests/__pycache__/
+.tools/

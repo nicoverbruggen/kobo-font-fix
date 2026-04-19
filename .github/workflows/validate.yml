@@ -53,3 +53,6 @@ jobs:
                   print(f'OK:   {path} — {pairs} kern pairs')
           sys.exit(1 if errors else 0)
           "
+
+      - name: Validate generated fonts with ots-sanitize
+        run: python3 validate.py fonts/NV_*.ttf fonts/KF_*.ttf
