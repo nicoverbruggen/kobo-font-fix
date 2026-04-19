@@ -142,16 +142,46 @@ class FontProcessor:
         self.line_percent = line_percent
 
     @staticmethod
+    def _find_available_ots() -> Optional[Path]:
+        """Return a usable ots-sanitize path if already installed or cached."""
+        import shutil as sh
+
+        binary = "ots-sanitize.exe" if os.name == "nt" else "ots-sanitize"
+        system_binary = sh.which(binary)
+        if system_binary:
+            return Path(system_binary)
+
+        tools_dir = Path(__file__).resolve().parent / ".tools"
+        if not tools_dir.exists():
+            return None
+
+        for path in tools_dir.rglob(binary):
+            if path.is_file():
+                return path
+        return None
+
+    @staticmethod
+    def _validate_font(ots: Path, font_path: Path) -> Tuple[bool, str]:
+        """Run ots-sanitize against a font. Returns (ok, combined_output)."""
+        import subprocess as sp
+
+        result = sp.run(
+            [str(ots), str(font_path), os.devnull],
+            capture_output=True,
+            text=True,
+        )
+        output = (result.stdout + result.stderr).strip()
+        return result.returncode == 0, output
+
+    @staticmethod
     def _validate_output_font(output_path: str) -> bool:
         """Validate the final output font if ots-sanitize is already available."""
-        from validate import find_available_ots, validate_font
-
-        ots = find_available_ots()
+        ots = FontProcessor._find_available_ots()
         if not ots:
             logger.warning("WARNING: skipped ots-sanitize step (missing)")
             return True
 
-        ok, output = validate_font(ots, Path(output_path))
+        ok, output = FontProcessor._validate_font(ots, Path(output_path))
         status = "OK" if ok else "FAIL"
         logger.info(f"  ots-sanitize: {status}")
         if output:
