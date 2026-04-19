@@ -1,12 +1,11 @@
-name: Run tests
+name: CI
 
 on:
   push:
     branches: [main, develop]
-  pull_request:
 
 jobs:
-  tests:
+  ci:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/nicoverbruggen/fntbld-oci:latest
@@ -17,3 +16,46 @@ jobs:
 
       - name: Run test suite
         run: python3 -m unittest discover -s tests -v
+
+      - name: Download latest Readerly font
+        run: |
+          apt-get update && apt-get install -y curl jq
+          LATEST_TAG=$(curl -s https://api.github.com/repos/nicoverbruggen/readerly/releases/latest | jq -r '.tag_name')
+          curl -L -o Readerly.zip "https://github.com/nicoverbruggen/readerly/releases/download/${LATEST_TAG}/Readerly.zip"
+          unzip Readerly.zip -d fonts
+
+      - name: Dry run NV preset
+        run: python3 kobofix.py --preset nv --dry-run fonts/*.ttf
+
+      - name: Run NV preset
+        run: python3 kobofix.py --preset nv fonts/*.ttf
+
+      - name: Dry run KF preset on NV output
+        run: python3 kobofix.py --preset kf --dry-run fonts/NV_*.ttf
+
+      - name: Run KF preset on NV output
+        run: python3 kobofix.py --preset kf fonts/NV_*.ttf
+
+      - name: Validate KF fonts have kern table
+        run: |
+          python3 -c "
+          from fontTools.ttLib import TTFont
+          import glob, sys
+          errors = 0
+          for path in sorted(glob.glob('fonts/KF_*.ttf')):
+              font = TTFont(path)
+              has_kern = 'kern' in font
+              pairs = 0
+              if has_kern:
+                  for st in font['kern'].kernTables:
+                      pairs += len(st.kernTable)
+              if not has_kern or pairs == 0:
+                  print(f'FAIL: {path} — missing or empty kern table')
+                  errors += 1
+              else:
+                  print(f'OK:   {path} — {pairs} kern pairs')
+          sys.exit(1 if errors else 0)
+          "
+
+      - name: Validate generated fonts with ots-sanitize
+        run: python3 validate.py fonts/NV_*.ttf fonts/KF_*.ttf

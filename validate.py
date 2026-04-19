@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import platform
+import shutil
 import stat
 import subprocess
 import sys
@@ -62,7 +63,12 @@ def _fetch_latest_release() -> dict:
 
 
 def _ensure_ots() -> Path:
-    """Return a path to ots-sanitize, downloading it on first use."""
+    """Return a path to ots-sanitize, preferring a system install first."""
+    system_binary = shutil.which(_binary_name())
+    if system_binary:
+        logger.debug(f"Using system ots-sanitize at {system_binary}")
+        return Path(system_binary)
+
     TOOLS_DIR.mkdir(exist_ok=True)
 
     cached = _find_binary(TOOLS_DIR)

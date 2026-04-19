@@ -28,6 +28,8 @@ If you want to use the `--hint additive` or `--hint overwrite` options, you also
 brew install ttfautohint  # macOS
 ```
 
+For font validation, `validate.py` uses a system `ots-sanitize` binary when one is available. If it is not installed, the script downloads the latest compatible OTS release on first run and caches it under `./.tools`.
+
 On macOS, if you're using the built-in version of Python (via Xcode), you may need to first add a folder to your `PATH` to make `font-line` available, like:
 
 ```bash
@@ -93,7 +95,7 @@ For debugging purposes, you can run the script with the `--verbose` flag.
 
 ## Testing
 
-The repository now includes a `unittest` suite that covers both targeted font-table logic and end-to-end processing against real Readerly fonts.
+The repository includes a `unittest` suite that covers targeted font-table logic, end-to-end processing against real Readerly fonts, and the validator's OTS resolution logic.
 
 Run the full suite with:
 
@@ -102,6 +104,12 @@ python3 -m unittest discover -s tests -v
 ```
 
 On first run, the integration tests download the latest `Readerly.zip` release into `./tests/fixtures` and reuse those extracted fonts on later runs.
+
+You can also validate generated fonts directly with:
+
+```bash
+python3 validate.py ./path/to/fonts/*.ttf
+```
 
 ## Presets
 
