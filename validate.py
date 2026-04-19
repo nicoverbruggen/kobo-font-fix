@@ -55,6 +55,24 @@ def _find_binary(root: Path) -> Optional[Path]:
     return None
 
 
+def find_available_ots() -> Optional[Path]:
+    """Return a usable ots-sanitize path if already installed or cached."""
+    system_binary = shutil.which(_binary_name())
+    if system_binary:
+        logger.debug(f"Using system ots-sanitize at {system_binary}")
+        return Path(system_binary)
+
+    if not TOOLS_DIR.exists():
+        return None
+
+    cached = _find_binary(TOOLS_DIR)
+    if cached:
+        logger.debug(f"Using cached ots-sanitize at {cached}")
+        return cached
+
+    return None
+
+
 def _fetch_latest_release() -> dict:
     url = f"https://api.github.com/repos/{OTS_REPO}/releases/latest"
     req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
@@ -64,17 +82,11 @@ def _fetch_latest_release() -> dict:
 
 def _ensure_ots() -> Path:
     """Return a path to ots-sanitize, preferring a system install first."""
-    system_binary = shutil.which(_binary_name())
-    if system_binary:
-        logger.debug(f"Using system ots-sanitize at {system_binary}")
-        return Path(system_binary)
+    available = find_available_ots()
+    if available:
+        return available
 
     TOOLS_DIR.mkdir(exist_ok=True)
-
-    cached = _find_binary(TOOLS_DIR)
-    if cached:
-        logger.debug(f"Using cached ots-sanitize at {cached}")
-        return cached
 
     logger.info("ots-sanitize not cached; fetching latest release...")
     release = _fetch_latest_release()

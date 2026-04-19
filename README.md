@@ -4,7 +4,7 @@
 
 **`kobofix.py` is a Python script designed to process and adjust TTF fonts for Kobo e-readers for a better reading experience with the default `kepub` renderer.**
 
-It generates a renamed font, fixes PANOSE information based on the filename, adjusts the baseline with the `font-line` utility, simplifies outlines with `skia-pathops`, optionally controls hinting via `ttfautohint`, and adds a legacy `kern` table which allows the `kepub` engine for improved rendering of kerned pairs.
+It generates a renamed font, fixes PANOSE information based on the filename, adjusts the baseline with the `font-line` utility, simplifies outlines with `skia-pathops`, optionally controls hinting via `ttfautohint`, adds a legacy `kern` table which allows the `kepub` engine for improved rendering of kerned pairs, and validates finished output with `ots-sanitize` when that tool is already available.
 
 You can use this to modify or fix your own, legally acquired fonts (assuming you are permitted to do so).
 
@@ -28,7 +28,9 @@ If you want to use the `--hint additive` or `--hint overwrite` options, you also
 brew install ttfautohint  # macOS
 ```
 
-For font validation, `validate.py` uses a system `ots-sanitize` binary when one is available. If it is not installed, the script downloads the latest compatible OTS release on first run and caches it under `./.tools`.
+For standalone font validation, `validate.py` uses a system `ots-sanitize` binary when one is available. If it is not installed, the script downloads the latest compatible OTS release on first run and caches it under `./.tools`.
+
+When `kobofix.py` finishes writing a processed font, it also runs `ots-sanitize` automatically if a system or cached binary is already available. If not, processing continues and the validation step is skipped with this warning: `WARNING: skipped ots-sanitize step (missing)`.
 
 On macOS, if you're using the built-in version of Python (via Xcode), you may need to first add a folder to your `PATH` to make `font-line` available, like:
 
@@ -65,12 +67,15 @@ With the Kobo Fix (KF) preset, the script will:
 5. **Font weight metadata is updated.** There's other metadata that is part of the font that reflects the weight of the font. In case this information needs to be modified, it is adjusted.
 6. **Kern pairs from the GPOS table are copied to the legacy `kern` table.** This only applies to fonts that have a GPOS table, which is used for kerning in modern fonts. When there are more pairs than the format 0 limit (10,920), pairs are prioritized by Unicode range so that common Latin kerning is preserved.
 7. **Outlines are simplified.** Overlapping contours are merged and degenerate (zero-area) contours are removed. This improves rendering consistency on e-ink displays. Can be disabled with `--outline skip`.
+8. **The final written font is validated with `ots-sanitize` when available.** If validation fails, that font is treated as a processing failure and the overall command exits non-zero. If `ots-sanitize` is not present, the validation step is skipped with a warning instead of downloading anything automatically.
 
 Other presets and flags can change this behavior. For example, the NV preset applies 20% line spacing and skips kerning, and the `--hint` flag can be used to control hinting. 
 
 See [Customization](#customization) and [Presets](#presets) for details.
 
 The modified fonts are saved in the directory where the original fonts are located.
+
+If `ots-sanitize` reports warnings but exits successfully, processing still succeeds and those warnings are shown in the output. A non-zero `ots-sanitize` exit code causes that font to fail validation.
 
 ## Customization
 

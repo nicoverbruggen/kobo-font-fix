@@ -140,6 +140,24 @@ class FontProcessor:
         """
         self.prefix = prefix
         self.line_percent = line_percent
+
+    @staticmethod
+    def _validate_output_font(output_path: str) -> bool:
+        """Validate the final output font if ots-sanitize is already available."""
+        from validate import find_available_ots, validate_font
+
+        ots = find_available_ots()
+        if not ots:
+            logger.warning("WARNING: skipped ots-sanitize step (missing)")
+            return True
+
+        ok, output = validate_font(ots, Path(output_path))
+        status = "OK" if ok else "FAIL"
+        logger.info(f"  ots-sanitize: {status}")
+        if output:
+            for line in output.splitlines():
+                logger.info(f"    {line}")
+        return ok
     
     # ============================================================
     # Helper methods
@@ -1311,6 +1329,10 @@ class FontProcessor:
                     needs_adjustment = current_pct != self.line_percent
                 if needs_adjustment:
                     self.apply_line_adjustment(output_path)
+
+            if not self._validate_output_font(output_path):
+                logger.error("  ots-sanitize validation failed.")
+                return False
 
             return True
         except Exception as e:

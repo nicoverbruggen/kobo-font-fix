@@ -3,6 +3,8 @@ from __future__ import annotations
 import types
 import unittest
 import inspect
+from pathlib import Path
+from unittest import mock
 
 from fontTools.ttLib import TTFont, newTable
 
@@ -187,6 +189,25 @@ class KobofixUnitTests(unittest.TestCase):
         self.assertEqual(
             FontProcessor._glyph_priority("quotedblright", cmap_reverse),
             FontProcessor._glyph_priority("ellipsis", cmap_reverse),
+        )
+
+    def test_validate_output_font_warns_when_ots_is_missing(self) -> None:
+        with self.assertLogs("kobofix", level="WARNING") as captured:
+            with mock.patch("validate.find_available_ots", return_value=None):
+                ok = FontProcessor._validate_output_font("/tmp/KF_Readerly-Regular.ttf")
+
+        self.assertTrue(ok)
+        self.assertIn("WARNING: skipped ots-sanitize step (missing)", captured.output[0])
+
+    def test_validate_output_font_uses_available_ots_binary(self) -> None:
+        with mock.patch("validate.find_available_ots", return_value=Path("/usr/bin/ots-sanitize")):
+            with mock.patch("validate.validate_font", return_value=(True, "File sanitized successfully!")) as run_validate:
+                ok = FontProcessor._validate_output_font("/tmp/KF_Readerly-Regular.ttf")
+
+        self.assertTrue(ok)
+        run_validate.assert_called_once_with(
+            Path("/usr/bin/ots-sanitize"),
+            Path("/tmp/KF_Readerly-Regular.ttf"),
         )
 
 
