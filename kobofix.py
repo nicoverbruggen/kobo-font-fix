@@ -29,11 +29,13 @@ Requirements:
 
 import sys
 import os
+import re
 import shutil
 import subprocess
 import argparse
 import logging
 import string
+from datetime import date
 from pathlib import Path
 from collections import defaultdict
 from dataclasses import dataclass
@@ -108,6 +110,24 @@ TYPOGRAPHIC_PRIORITY_CODEPOINTS = {
     0x2039,  # SINGLE LEFT-POINTING ANGLE QUOTATION MARK
     0x203A,  # SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
 }
+
+
+STAMP_URL = "https://github.com/nicoverbruggen/kobo-font-fix"
+STAMP_RE = re.compile(
+    r"\s*Patched with `kobo-font-fix` \([^)]*\) for improved compatibility with Kobo devices on \d{4}-\d{2}-\d{2}\.",
+)
+
+
+def _build_stamped_copyright(current: str) -> str:
+    """Return copyright text with a fresh kobo-font-fix stamp appended.
+
+    Any prior stamp (same tool, any date/url) is removed first so repeated
+    runs don't accumulate lines.
+    """
+    cleaned = STAMP_RE.sub("", current or "").rstrip()
+    today = date.today().isoformat()
+    suffix = f"Patched with `kobo-font-fix` ({STAMP_URL}) for improved compatibility with Kobo devices on {today}."
+    return f"{cleaned}\n\n{suffix}" if cleaned else suffix
 
 
 @dataclass
@@ -740,6 +760,21 @@ class FontProcessor:
             logger.debug("  No 'post' table in this font.")
 
     # ============================================================
+    # Copyright stamp
+    # ============================================================
+
+    def stamp_copyright(self, font: TTFont) -> None:
+        """Append a kobo-font-fix patch stamp to the copyright (name ID 0)."""
+        if "name" not in font:
+            return
+        record = font["name"].getName(0, 3, 1, 0x0409) or font["name"].getName(0, 1, 0, 0)
+        current = record.toUnicode() if record else ""
+        new_value = _build_stamped_copyright(current)
+        if new_value != current:
+            self._set_name_records(font, 0, new_value)
+            logger.info("  Notice stamp applied in copyright section")
+
+    # ============================================================
     # Weight metadata methods
     # ============================================================
 
@@ -1011,6 +1046,7 @@ class FontProcessor:
         hint_mode: str,
         metadata: FontMetadata,
         is_otf: bool = False,
+        stamp: bool = False,
     ) -> List[str]:
         """
         Analyze what changes would be made to the font.
@@ -1173,6 +1209,13 @@ class FontProcessor:
             else:
                 changes.append(f"Adjust line spacing ({self.line_percent}% baseline shift)")
 
+        # Check copyright stamp
+        if stamp and self.prefix == "KF" and "name" in font:
+            record = font["name"].getName(0, 3, 1, 0x0409) or font["name"].getName(0, 1, 0, 0)
+            current = record.toUnicode() if record else ""
+            if _build_stamped_copyright(current) != current:
+                changes.append("Stamp copyright with kobo-font-fix patch note")
+
         # Check output path
         output_path = self._generate_output_path(font_path, metadata)
         if output_path != font_path:
@@ -1257,6 +1300,7 @@ class FontProcessor:
         hint_mode: str = "skip",
         dry_run: bool = False,
         outline_mode: str = "apply",
+        stamp: bool = False,
     ) -> bool:
         """
         Process a single font file, or report what would change in dry-run mode.
@@ -1287,7 +1331,7 @@ class FontProcessor:
         if not metadata:
             return False
 
-        changes = self._analyze_changes(font, font_path, kern_mode, hint_mode, metadata, is_otf)
+        changes = self._analyze_changes(font, font_path, kern_mode, hint_mode, metadata, is_otf, stamp)
 
         if not changes:
             logger.info("  No changes needed.")
@@ -1315,6 +1359,8 @@ class FontProcessor:
                 font["name"].names = new_names_list
 
             self.rename_font(font, metadata)
+            if stamp and self.prefix == "KF":
+                self.stamp_copyright(font)
             self.check_and_fix_panose(font, font_path)
             self.update_weight_metadata(font, font_path)
             self.update_style_flags(font, font_path)
@@ -1548,6 +1594,9 @@ Examples:
              "'skip' leaves kerning untouched.")
     parser.add_argument("--dry-run", action="store_true",
         help="Report what would change without modifying any files.")
+    parser.add_argument("--stamp", action="store_true",
+        help="When using the KF prefix, append a dated kobo-font-fix patch note "
+             "to the copyright (name ID 0). No effect for other prefixes.")
     parser.add_argument("--verbose", action="store_true",
         help="Enable verbose output.")
     parser.add_argument("--remove-prefix", type=str,
@@ -1641,6 +1690,7 @@ Examples:
             args.hint,
             args.dry_run,
             args.outline,
+            args.stamp,
         ):
             success_count += 1
 
