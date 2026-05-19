@@ -7,6 +7,8 @@ from pathlib import Path
 from unittest import mock
 
 from fontTools.ttLib import TTFont, newTable
+from fontTools.fontBuilder import FontBuilder
+from fontTools.pens.ttGlyphPen import TTGlyphPen
 
 from kobofix import FontMetadata, FontProcessor
 
@@ -208,6 +210,57 @@ class KobofixUnitTests(unittest.TestCase):
         run_validate.assert_called_once_with(
             Path("/usr/bin/ots-sanitize"),
             Path("/tmp/KF_Readerly-Regular.ttf"),
+        )
+
+    def test_flatten_composites_converts_components_to_simple_outlines(self) -> None:
+        def rect_glyph(x_min: int, y_min: int, x_max: int, y_max: int):
+            pen = TTGlyphPen(None)
+            pen.moveTo((x_min, y_min))
+            pen.lineTo((x_max, y_min))
+            pen.lineTo((x_max, y_max))
+            pen.lineTo((x_min, y_max))
+            pen.closePath()
+            return pen.glyph()
+
+        component_pen = TTGlyphPen({"base": None, "mark": None})
+        component_pen.addComponent("base", (1, 0, 0, 1, 0, 0))
+        component_pen.addComponent("mark", (1, 0, 0, 1, 10, 20))
+
+        glyphs = {
+            ".notdef": TTGlyphPen(None).glyph(),
+            "base": rect_glyph(0, 0, 100, 100),
+            "mark": rect_glyph(0, 0, 20, 20),
+            "base.mark": component_pen.glyph(),
+        }
+
+        builder = FontBuilder(1000, isTTF=True)
+        builder.setupGlyphOrder(list(glyphs))
+        builder.setupGlyf(glyphs)
+        builder.setupHorizontalMetrics({
+            ".notdef": (500, 0),
+            "base": (500, 0),
+            "mark": (0, 0),
+            "base.mark": (500, 0),
+        })
+        builder.setupHorizontalHeader(ascent=800, descent=-200)
+        builder.setupMaxp()
+        font = builder.font
+
+        self.assertTrue(font["glyf"]["base.mark"].isComposite())
+
+        flattened = FontProcessor.flatten_composites(font)
+
+        self.assertEqual(flattened, 1)
+        self.assertFalse(font["glyf"]["base.mark"].isComposite())
+        self.assertEqual(font["glyf"]["base.mark"].numberOfContours, 2)
+        self.assertEqual(
+            (
+                font["glyf"]["base.mark"].xMin,
+                font["glyf"]["base.mark"].yMin,
+                font["glyf"]["base.mark"].xMax,
+                font["glyf"]["base.mark"].yMax,
+            ),
+            (0, 0, 100, 100),
         )
 
 

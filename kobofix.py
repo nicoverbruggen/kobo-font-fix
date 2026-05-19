@@ -14,6 +14,7 @@ Processes TrueType fonts to improve compatibility with Kobo e-readers:
 - Kerning: extracting GPOS pairs (Format 1, Format 2, and Extension lookups)
   into a legacy kern table, prioritized by Unicode range to fit within
   format 0 size constraints
+- Flattening TrueType composite glyphs to avoid Kobo renderer artifacts
 - Hinting: optionally stripping hints or applying ttfautohint
 
 Supports --dry-run to preview what would change without modifying files.
@@ -1047,6 +1048,7 @@ class FontProcessor:
         metadata: FontMetadata,
         is_otf: bool = False,
         stamp: bool = False,
+        outline_mode: str = "apply",
     ) -> List[str]:
         """
         Analyze what changes would be made to the font.
@@ -1196,6 +1198,15 @@ class FontProcessor:
             if not self._font_has_hints(font):
                 changes.append("Apply ttfautohint (additive)")
 
+        # Check composite outlines
+        if outline_mode == "apply" and "glyf" in font:
+            composite_count = sum(
+                1 for name in font.getGlyphOrder()
+                if font["glyf"][name].isComposite()
+            )
+            if composite_count:
+                changes.append(f"Flatten {composite_count} composite glyph(s)")
+
         # Check line adjustment
         if self.line_percent != 0:
             if "OS/2" in font and "head" in font:
@@ -1292,6 +1303,47 @@ class FontProcessor:
 
         return removed_total
 
+    @staticmethod
+    def flatten_composites(font: TTFont) -> int:
+        """Convert TrueType composite glyphs to simple outlines.
+
+        Some Kobo firmware text paths appear to mishandle composite and nested
+        composite glyphs. Flattening preserves the final glyph shapes while
+        removing component references from the saved glyf table.
+        """
+        if "glyf" not in font:
+            return 0
+
+        from fontTools.pens.basePen import DecomposingPen
+        from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+        class DecomposingTTGlyphPen(DecomposingPen, TTGlyphPen):
+            pass
+
+        glyf = font["glyf"]
+        glyph_set = font.getGlyphSet()
+        composite_names = [
+            name for name in font.getGlyphOrder()
+            if glyf[name].isComposite()
+        ]
+
+        for name in composite_names:
+            pen = DecomposingTTGlyphPen(glyph_set)
+            glyph_set[name].draw(pen)
+            glyph = pen.glyph()
+            if hasattr(glyph, "recalcBounds"):
+                glyph.recalcBounds(glyf)
+            glyf[name] = glyph
+
+        if composite_names and "maxp" in font:
+            maxp = font["maxp"]
+            if hasattr(maxp, "maxComponentDepth"):
+                maxp.maxComponentDepth = 0
+            if hasattr(maxp, "maxComponentElements"):
+                maxp.maxComponentElements = 0
+
+        return len(composite_names)
+
     def process_font(self,
         kern_mode: str,
         font_path: str,
@@ -1331,7 +1383,16 @@ class FontProcessor:
         if not metadata:
             return False
 
-        changes = self._analyze_changes(font, font_path, kern_mode, hint_mode, metadata, is_otf, stamp)
+        changes = self._analyze_changes(
+            font,
+            font_path,
+            kern_mode,
+            hint_mode,
+            metadata,
+            is_otf,
+            stamp,
+            outline_mode,
+        )
 
         if not changes:
             logger.info("  No changes needed.")
@@ -1383,6 +1444,10 @@ class FontProcessor:
                 cleaned = self.clean_degenerate_contours(font)
                 if cleaned:
                     logger.info(f"  Cleaned {cleaned} zero-area contour(s)")
+
+                flattened = self.flatten_composites(font)
+                if flattened:
+                    logger.info(f"  Flattened {flattened} composite glyph(s)")
 
             output_path = self._generate_output_path(font_path, metadata)
             font.save(output_path)
