@@ -26,8 +26,8 @@ Requirements:
 - fontTools (pip install fonttools)
 - font-line (pip install font-line)
 - skia-pathops (pip install skia-pathops)
-- ttfautohint (needed when outline processing rewrites a font that already has
-  meaningful glyph-level TrueType hints)
+- ttfautohint
+- ots-sanitize
 """
 
 import sys
@@ -196,11 +196,11 @@ class FontProcessor:
 
     @staticmethod
     def _validate_output_font(output_path: str) -> bool:
-        """Validate the final output font if ots-sanitize is already available."""
+        """Validate the final output font with ots-sanitize."""
         ots = FontProcessor._find_available_ots()
         if not ots:
-            logger.warning("WARNING: skipped ots-sanitize step (missing)")
-            return True
+            logger.error("  ots-sanitize is required to validate processed fonts.")
+            return False
 
         ok, output = FontProcessor._validate_font(ots, Path(output_path))
         status = "OK" if ok else "FAIL"
@@ -1454,7 +1454,8 @@ class FontProcessor:
                     current_pct = round(((asc - desc + gap) / upm - 1) * 100)
                     needs_adjustment = current_pct != self.line_percent
                 if needs_adjustment:
-                    self.apply_line_adjustment(output_path)
+                    if not self.apply_line_adjustment(output_path):
+                        return False
 
             if not self._validate_output_font(output_path):
                 logger.error("  ots-sanitize validation failed.")
@@ -1554,17 +1555,19 @@ def otf_to_ttf(font: TTFont, max_err: float = 1.0) -> None:
         maxp.maxComponentDepth = 0
 
 
-def check_dependencies(line_percent: int, outline_mode: str = "apply") -> None:
+def check_dependencies() -> None:
     """Check that all required external tools are available before processing."""
     missing = []
-    if line_percent != 0:
-        if shutil.which("font-line") is None:
-            missing.append("font-line")
-    if outline_mode == "apply":
-        try:
-            import pathops  # noqa: F401
-        except ImportError:
-            missing.append("skia-pathops (pip install skia-pathops)")
+    if shutil.which("font-line") is None:
+        missing.append("font-line")
+    if shutil.which("ttfautohint") is None:
+        missing.append("ttfautohint")
+    if FontProcessor._find_available_ots() is None:
+        missing.append("ots-sanitize")
+    try:
+        import pathops  # noqa: F401
+    except ImportError:
+        missing.append("skia-pathops (pip install skia-pathops)")
     if missing:
         logger.error(f"Missing required dependencies: {', '.join(missing)}")
         logger.error("Please install them before running this script.")
@@ -1694,8 +1697,7 @@ Examples:
         logger.warning("--name and --remove-prefix were both specified. --name takes precedence; --remove-prefix will be ignored.")
         args.remove_prefix = None
 
-    if not args.dry_run:
-        check_dependencies(args.line_percent, args.outline)
+    check_dependencies()
 
     valid_files, invalid_files = validate_font_files(args.fonts)
 

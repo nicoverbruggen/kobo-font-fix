@@ -14,7 +14,7 @@ Licensed under the [MIT License](/LICENSE).
 
 ## Requirements
 
-Python 3, FontTools, `font-line`, `skia-pathops`, and `ttfautohint`.
+Python 3, FontTools, `font-line`, `skia-pathops`, `ttfautohint`, and `ots-sanitize`.
 
 You can install the Python packages like so:
 
@@ -30,7 +30,7 @@ brew install ttfautohint  # macOS
 
 For standalone font validation, `validate.py` uses a system `ots-sanitize` binary when one is available. If it is not installed, the script downloads the latest compatible OTS release on first run and caches it under `./.tools`.
 
-When `kobofix.py` finishes writing a processed font, it also runs `ots-sanitize` automatically if a system or cached binary is already available. If not, processing continues and the validation step is skipped with this warning: `WARNING: skipped ots-sanitize step (missing)`.
+`kobofix.py` requires an available `ots-sanitize` binary, either installed on `PATH` or already cached under `./.tools` by `validate.py`. Missing dependencies are reported before processing starts.
 
 On macOS, if you're using the built-in version of Python (via Xcode), you may need to first add a folder to your `PATH` to make `font-line` available, like:
 
@@ -68,7 +68,7 @@ With the Kobo Fix (KF) preset, the script will:
 6. **Kern pairs from the GPOS table are copied to the legacy `kern` table.** This only applies to fonts that have a GPOS table, which is used for kerning in modern fonts. When there are more pairs than the format 0 limit (10,920), pairs are prioritized by Unicode range so that common Latin kerning is preserved.
 7. **Outlines are simplified.** Overlapping contours are merged, degenerate (zero-area) contours are removed, and composite glyphs are flattened to simple outlines. This improves rendering consistency on e-ink displays. Can be disabled with `--outline skip`.
 8. **Meaningfully hinted fonts are re-hinted after outline processing.** Because outline rewriting invalidates old glyph bytecode, `ttfautohint` is run on the final output only when the source font had real glyph-level TrueType hints.
-9. **The final written font is validated with `ots-sanitize` when available.** If validation fails, that font is treated as a processing failure and the overall command exits non-zero. If `ots-sanitize` is not present, the validation step is skipped with a warning instead of downloading anything automatically.
+9. **The final written font is validated with `ots-sanitize`.** If validation fails, that font is treated as a processing failure and the overall command exits non-zero.
 
 Other presets and flags can change this behavior. For example, the NV preset applies 20% line spacing, skips kerning, and leaves outlines untouched.
 

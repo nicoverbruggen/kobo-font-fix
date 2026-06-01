@@ -192,13 +192,13 @@ class KobofixUnitTests(unittest.TestCase):
             FontProcessor._glyph_priority("ellipsis", cmap_reverse),
         )
 
-    def test_validate_output_font_warns_when_ots_is_missing(self) -> None:
-        with self.assertLogs("kobofix", level="WARNING") as captured:
+    def test_validate_output_font_fails_when_ots_is_missing(self) -> None:
+        with self.assertLogs("kobofix", level="ERROR") as captured:
             with mock.patch.object(FontProcessor, "_find_available_ots", return_value=None):
                 ok = FontProcessor._validate_output_font("/tmp/KF_Readerly-Regular.ttf")
 
-        self.assertTrue(ok)
-        self.assertIn("WARNING: skipped ots-sanitize step (missing)", captured.output[0])
+        self.assertFalse(ok)
+        self.assertIn("ots-sanitize is required", captured.output[0])
 
     def test_validate_output_font_uses_available_ots_binary(self) -> None:
         with mock.patch.object(FontProcessor, "_find_available_ots", return_value=Path("/usr/bin/ots-sanitize")):
