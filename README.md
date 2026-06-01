@@ -4,51 +4,40 @@
 
 **`kobofix.py` is a Python script designed to process and adjust TTF fonts for Kobo e-readers for a better reading experience with the default `kepub` renderer.**
 
-It generates a renamed font, fixes PANOSE information based on the filename, adjusts the baseline with the `font-line` utility, simplifies outlines with `skia-pathops`, flattens composite glyphs for Kobo compatibility, re-hints rewritten outlines when the source font had meaningful glyph-level TrueType hints, adds a legacy `kern` table which allows the `kepub` engine for improved rendering of kerned pairs, and validates finished output with `ots-sanitize` when that tool is already available.
+It generates a renamed font, fixes PANOSE information based on the filename, adjusts the baseline with the `font-line` utility, simplifies outlines with `skia-pathops`, flattens composite glyphs for Kobo compatibility, re-hints rewritten outlines when the source font had meaningful glyph-level TrueType hints, adds a legacy `kern` table which allows the `kepub` engine for improved rendering of kerned pairs, and validates finished output with `ots-sanitize`.
 
-You can use this to modify or fix your own, legally acquired fonts (assuming you are permitted to do so).
-
-## License
-
-Licensed under the [MIT License](/LICENSE).
+> [!NOTE]
+> You can also use this to modify or fix your own, legally acquired fonts, assuming you are legally allowed to do so. The author of this script does not recommend modifying fonts which don't specify in their license agreement that they can be modified. Using this script is done at your own risk. 
 
 ## Requirements
 
-Python 3, FontTools, `font-line`, `skia-pathops`, `ttfautohint`, and `ots-sanitize`.
+Docker or Podman must be installed. The [`fntbld-oci`](https://github.com/nicoverbruggen/fntbld-oci/pkgs/container/fntbld-oci) container is used to build the actual fonts.
 
-You can install the Python packages like so:
-
-```bash
-pip3 install fonttools font-line skia-pathops
-```
-
-Install `ttfautohint` with your package manager, for example:
-
-```bash
-brew install ttfautohint  # macOS
-```
-
-For standalone font validation, `validate.py` uses a system `ots-sanitize` binary when one is available. If it is not installed, the script downloads the latest compatible OTS release on first run and caches it under `./.tools`.
-
-`kobofix.py` requires an available `ots-sanitize` binary, either installed on `PATH` or already cached under `./.tools` by `validate.py`. Missing dependencies are reported before processing starts.
-
-On macOS, if you're using the built-in version of Python (via Xcode), you may need to first add a folder to your `PATH` to make `font-line` available, like:
-
-```bash
-echo 'export PATH="$HOME/Library/Python/3.9/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
+Alternatively, you can also install the dependencies and run the script locally. Python 3, FontTools, `font-line`, `skia-pathops`, `ttfautohint`, and `ots-sanitize` must all be installed if you want to process fonts locally without using the container.
 
 ## Usage
 
-Open a terminal and navigate to the directory containing your font files. Make sure your font files are named correctly. The script will process files that contain the string:
+The easiest way to run `kobofix.py` without installing the native tools yourself is to use the `fntbld-oci` image. It includes all dependencies. To use it, clone this repository, and with input fonts in `./src`, you can run a preset:
 
-- `Regular`
-- `Italic`
-- `Bold`
-- `BoldItalic`
+```bash
+docker run --rm \
+  -v "$PWD:/work" \
+  -w /work \
+  ghcr.io/nicoverbruggen/fntbld-oci:latest \
+  python3 kobofix.py --preset kf ./src/*.ttf
+```
 
-This is the naming convention used on Kobo devices for proper compatibility with both the `epub` and `kepub` renderer.
+**The script normally writes processed fonts next to the originals, but you should still keep backups before running it.**
+
+The processed fonts are written next to the input fonts inside the mounted directory. Docker should select the correct image architecture automatically. Podman works with the same mount and working directory arguments, so if you prefer using Podman (e.g. on Linux) you can use that, too.
+
+## How it works
+
+### Ensuring font names are correct
+
+The script will process files that contain the string: `Regular`, `Italic`, `Bold` and `BoldItalic`. This is the naming convention used on Kobo devices for proper compatibility with both the `epub` and `kepub` renderer. You must name your fonts correctly.
+
+### Running with default preset
 
 You can then run:
 
@@ -56,9 +45,11 @@ You can then run:
 python3 kobofix.py --preset kf ./src/*.ttf
 ```
 
-If no preset or flags are provided, the script will prompt you to choose a preset. See the [Presets](#presets) section below for details.
+If no preset or flags are provided, the script will prompt you to choose a preset.
 
-With the Kobo Fix (KF) preset, the script will:
+### Understanding the recommended preset
+
+The recommended preset will prepare your fonts for use on a Kobo device. It's the primary reason why you'd want to run this script. It runs the following operations, in order:
 
 1. **Validate all filenames.** If there are any invalid filenames, you will be prompted and can continue with all valid filenames, but it is recommended that you fix the invalid files.
 2. **Remove any WWS name metadata from the font.** This is done because the font is renamed afterwards.
@@ -70,13 +61,7 @@ With the Kobo Fix (KF) preset, the script will:
 8. **Meaningfully hinted fonts are re-hinted after outline processing.** Because outline rewriting invalidates old glyph bytecode, `ttfautohint` is run on the final output only when the source font had real glyph-level TrueType hints.
 9. **The final written font is validated with `ots-sanitize`.** If validation fails, that font is treated as a processing failure and the overall command exits non-zero.
 
-Other presets and flags can change this behavior. For example, the NV preset applies 20% line spacing, skips kerning, and leaves outlines untouched.
-
-See [Customization](#customization) and [Presets](#presets) for details.
-
-The modified fonts are saved in the directory where the original fonts are located.
-
-If `ots-sanitize` reports warnings but exits successfully, processing still succeeds and those warnings are shown in the output. A non-zero `ots-sanitize` exit code causes that font to fail validation.
+You can also use a different preset. For example, the NV preset applies 20% line spacing, skips kerning, and leaves outlines untouched. See [Customization](#customization) and [Presets](#presets) for details.
 
 ## Customization
 
@@ -86,17 +71,41 @@ You can customize what the script does. For more information, consult:
 ./kobofix.py -h
 ```
 
-Given the right arguments, you can:
-- Control kerning behavior (`--kern`): add a legacy kern table, remove GPOS after extraction, or skip entirely (default: skip)
-- Control outline simplification (`--outline`): apply overlap removal, degenerate contour cleanup, and composite flattening, or skip entirely (default: apply)
-- Use a custom family name for a font (`--name`)
-- Use a custom prefix (`--prefix`)
-- Remove an existing prefix before applying the new one (`--remove-prefix`)
-- Adjust the percentage of the `font-line` setting (`--line-percent`)
-- Skip running `font-line` altogether (set `--line-percent 0`)
-- Preview changes without modifying any files (`--dry-run`)
-
 For debugging purposes, you can run the script with the `--verbose` flag.
+
+## Presets
+
+The script includes presets for common workflows. If no preset or flags are provided, you will be prompted to choose one.
+
+### KF preset (for Kobo devices)
+
+Prepares KF fonts from NV fonts for use on Kobo devices. This preset applies the KF prefix while stripping other common prefixes, adds a legacy kern table, simplifies outlines, and flattens composite glyphs. If the source font was meaningfully hinted, the final rewritten output is re-hinted since this is required after simplifying outlines. No line spacing changes are made with this preset.
+
+```bash
+./kobofix.py --preset kf *.ttf
+```
+
+### NV preset (simpler use case)
+
+This prepares fonts for [this](https://github.com/nicoverbruggen/ebook-fonts) repository. This preset applies the NV prefix and a 20% line spacing (generally tight). This does not modify kerning or simplify outlines, and the original fonts are mostly kept as-is. Useful if you want to rename a font and generate a variant with a different line height (more tight or relaxed spacing).
+
+```bash
+./kobofix.py --preset nv *.ttf
+```
+
+You can override individual settings, for example to use relaxed spacing:
+
+```bash
+./kobofix.py --preset nv --line-percent 50 *.ttf
+```
+
+### Custom processing
+
+You can also specify all flags manually. For example, you can run:
+
+```bash
+./kobofix.py --prefix FNT --name="Fonty" --line-percent 33 --kern add-legacy-kern --outline apply *.ttf
+```
 
 ## Testing
 
@@ -116,36 +125,6 @@ You can also validate generated fonts directly with:
 python3 validate.py ./path/to/fonts/*.ttf
 ```
 
-## Presets
+## License
 
-The script includes presets for common workflows. If no preset or flags are provided, you will be prompted to choose one.
-
-### NV preset
-
-Prepares fonts for the [ebook-fonts](https://github.com/nicoverbruggen/ebook-fonts) repository. Applies the NV prefix and 20% line spacing. Does not modify kerning or outlines.
-
-```bash
-./kobofix.py --preset nv *.ttf
-```
-
-You can override individual settings, for example to use relaxed spacing:
-
-```bash
-./kobofix.py --preset nv --line-percent 50 *.ttf
-```
-
-### KF preset
-
-Prepares KF fonts from NV fonts for use on Kobo devices. Applies the KF prefix, automatically strips known prefixes (NV, KF), adds a legacy kern table, simplifies outlines, and flattens composite glyphs. If the source font had meaningful glyph-level TrueType hints, the final rewritten output is re-hinted. No line spacing changes are made (since NV fonts already have those applied).
-
-```bash
-./kobofix.py --preset kf *.ttf
-```
-
-### Custom processing
-
-You can also specify all flags manually:
-
-```bash
-./kobofix.py --prefix KF --name="Fonty" --line-percent 20 --kern add-legacy-kern --outline apply *.ttf
-```
+This project is [MIT](/LICENSE) licensed.
