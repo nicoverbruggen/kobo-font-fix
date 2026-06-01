@@ -104,7 +104,6 @@ class KobofixUnitTests(unittest.TestCase):
             font,
             "/tmp/Readerly-Regular.ttf",
             kern_mode="skip",
-            hint_mode="skip",
             metadata=metadata,
         )
 

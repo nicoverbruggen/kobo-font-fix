@@ -4,7 +4,7 @@
 
 **`kobofix.py` is a Python script designed to process and adjust TTF fonts for Kobo e-readers for a better reading experience with the default `kepub` renderer.**
 
-It generates a renamed font, fixes PANOSE information based on the filename, adjusts the baseline with the `font-line` utility, simplifies outlines with `skia-pathops`, flattens composite glyphs for Kobo compatibility, optionally controls hinting via `ttfautohint`, adds a legacy `kern` table which allows the `kepub` engine for improved rendering of kerned pairs, and validates finished output with `ots-sanitize` when that tool is already available.
+It generates a renamed font, fixes PANOSE information based on the filename, adjusts the baseline with the `font-line` utility, simplifies outlines with `skia-pathops`, flattens composite glyphs for Kobo compatibility, re-hints rewritten outlines when the source font had meaningful glyph-level TrueType hints, adds a legacy `kern` table which allows the `kepub` engine for improved rendering of kerned pairs, and validates finished output with `ots-sanitize` when that tool is already available.
 
 You can use this to modify or fix your own, legally acquired fonts (assuming you are permitted to do so).
 
@@ -14,15 +14,15 @@ Licensed under the [MIT License](/LICENSE).
 
 ## Requirements
 
-Python 3, FontTools, `font-line`, and `skia-pathops`.
+Python 3, FontTools, `font-line`, `skia-pathops`, and `ttfautohint`.
 
-You can install them like so:
+You can install the Python packages like so:
 
 ```bash
 pip3 install fonttools font-line skia-pathops
 ```
 
-If you want to use the `--hint additive` or `--hint overwrite` options, you also need `ttfautohint`:
+Install `ttfautohint` with your package manager, for example:
 
 ```bash
 brew install ttfautohint  # macOS
@@ -67,9 +67,10 @@ With the Kobo Fix (KF) preset, the script will:
 5. **Font weight metadata is updated.** There's other metadata that is part of the font that reflects the weight of the font. In case this information needs to be modified, it is adjusted.
 6. **Kern pairs from the GPOS table are copied to the legacy `kern` table.** This only applies to fonts that have a GPOS table, which is used for kerning in modern fonts. When there are more pairs than the format 0 limit (10,920), pairs are prioritized by Unicode range so that common Latin kerning is preserved.
 7. **Outlines are simplified.** Overlapping contours are merged, degenerate (zero-area) contours are removed, and composite glyphs are flattened to simple outlines. This improves rendering consistency on e-ink displays. Can be disabled with `--outline skip`.
-8. **The final written font is validated with `ots-sanitize` when available.** If validation fails, that font is treated as a processing failure and the overall command exits non-zero. If `ots-sanitize` is not present, the validation step is skipped with a warning instead of downloading anything automatically.
+8. **Meaningfully hinted fonts are re-hinted after outline processing.** Because outline rewriting invalidates old glyph bytecode, `ttfautohint` is run on the final output only when the source font had real glyph-level TrueType hints.
+9. **The final written font is validated with `ots-sanitize` when available.** If validation fails, that font is treated as a processing failure and the overall command exits non-zero. If `ots-sanitize` is not present, the validation step is skipped with a warning instead of downloading anything automatically.
 
-Other presets and flags can change this behavior. For example, the NV preset applies 20% line spacing and skips kerning, and the `--hint` flag can be used to control hinting. 
+Other presets and flags can change this behavior. For example, the NV preset applies 20% line spacing, skips kerning, and leaves outlines untouched.
 
 See [Customization](#customization) and [Presets](#presets) for details.
 
@@ -87,7 +88,6 @@ You can customize what the script does. For more information, consult:
 
 Given the right arguments, you can:
 - Control kerning behavior (`--kern`): add a legacy kern table, remove GPOS after extraction, or skip entirely (default: skip)
-- Control hinting (`--hint`): strip hints, apply ttfautohint to unhinted fonts (`additive`), apply ttfautohint to all fonts (`overwrite`), or skip (default: skip)
 - Control outline simplification (`--outline`): apply overlap removal, degenerate contour cleanup, and composite flattening, or skip entirely (default: apply)
 - Use a custom family name for a font (`--name`)
 - Use a custom prefix (`--prefix`)
@@ -122,7 +122,7 @@ The script includes presets for common workflows. If no preset or flags are prov
 
 ### NV preset
 
-Prepares fonts for the [ebook-fonts](https://github.com/nicoverbruggen/ebook-fonts) repository. Applies the NV prefix and 20% line spacing. Does not modify kerning, hinting, or outlines.
+Prepares fonts for the [ebook-fonts](https://github.com/nicoverbruggen/ebook-fonts) repository. Applies the NV prefix and 20% line spacing. Does not modify kerning or outlines.
 
 ```bash
 ./kobofix.py --preset nv *.ttf
@@ -136,7 +136,7 @@ You can override individual settings, for example to use relaxed spacing:
 
 ### KF preset
 
-Prepares KF fonts from NV fonts for use on Kobo devices. Applies the KF prefix, automatically strips known prefixes (NV, KF), adds a legacy kern table, simplifies outlines, and flattens composite glyphs. No line spacing changes are made (since NV fonts already have those applied).
+Prepares KF fonts from NV fonts for use on Kobo devices. Applies the KF prefix, automatically strips known prefixes (NV, KF), adds a legacy kern table, simplifies outlines, and flattens composite glyphs. If the source font had meaningful glyph-level TrueType hints, the final rewritten output is re-hinted. No line spacing changes are made (since NV fonts already have those applied).
 
 ```bash
 ./kobofix.py --preset kf *.ttf

@@ -15,7 +15,8 @@ Processes TrueType fonts to improve compatibility with Kobo e-readers:
   into a legacy kern table, prioritized by Unicode range to fit within
   format 0 size constraints
 - Flattening TrueType composite glyphs to avoid Kobo renderer artifacts
-- Hinting: optionally stripping hints or applying ttfautohint
+- Hinting: automatically re-running ttfautohint after outline rewriting when
+  the source font had meaningful glyph-level TrueType hints
 
 Supports --dry-run to preview what would change without modifying files.
 Includes NV and KF presets for common workflows, or can be fully
@@ -25,7 +26,8 @@ Requirements:
 - fontTools (pip install fonttools)
 - font-line (pip install font-line)
 - skia-pathops (pip install skia-pathops)
-- ttfautohint (optional, for --hint additive/overwrite)
+- ttfautohint (needed when outline processing rewrites a font that already has
+  meaningful glyph-level TrueType hints)
 """
 
 import sys
@@ -54,14 +56,12 @@ PRESETS = {
         "prefix": "NV",
         "line_percent": 20,
         "kern": "skip",
-        "hint": "skip",
         "outline": "skip",
     },
     "kf": {
         "prefix": "KF",
         "line_percent": 0,
         "kern": "add-legacy-kern",
-        "hint": "skip",
         "outline": "apply",
         "remove_prefix": "NV",
     },
@@ -918,35 +918,21 @@ class FontProcessor:
     # ============================================================
 
     @staticmethod
-    def _font_has_hints(font: TTFont) -> bool:
-        """Check whether a font contains TrueType hinting data."""
-        if "fpgm" in font or "prep" in font or "cvt " in font:
-            return True
+    def _font_has_meaningful_hints(font: TTFont) -> bool:
+        """Check whether real glyphs contain TrueType bytecode.
+
+        Global tables such as prep/fpgm/cvt are not enough: some fonts carry
+        only scan-conversion setup or .notdef bytecode. Those fonts should not
+        be considered meaningfully hinted for automatic rehinting.
+        """
         if "glyf" in font:
             for glyph_name in font.getGlyphOrder():
+                if glyph_name == ".notdef":
+                    continue
                 glyph = font["glyf"][glyph_name]
                 if hasattr(glyph, 'program') and glyph.program and glyph.program.getAssembly():
                     return True
         return False
-
-    @staticmethod
-    def strip_hints(font: TTFont) -> None:
-        """Remove all TrueType hints from the font."""
-        hints_removed = False
-        for table in ("fpgm", "prep", "cvt "):
-            if table in font:
-                del font[table]
-                hints_removed = True
-        if "glyf" in font:
-            for glyph_name in font.getGlyphOrder():
-                glyph = font["glyf"][glyph_name]
-                if hasattr(glyph, 'removeHinting'):
-                    glyph.removeHinting()
-                    hints_removed = True
-        if hints_removed:
-            logger.info("  Removed TrueType hints from the font.")
-        else:
-            logger.info("  No TrueType hints found to remove.")
 
     def apply_ttfautohint(self, font_path: str) -> bool:
         """Run ttfautohint on a saved font file, replacing it in-place.
@@ -955,6 +941,9 @@ class FontProcessor:
         grayscale renderer, which produces less distortion than the default
         strong grid-fitting.
         """
+        if shutil.which("ttfautohint") is None:
+            logger.error("  ttfautohint is required to rehint this font after outline processing.")
+            return False
         try:
             hinted_path = font_path + ".hinted"
             subprocess.run(
@@ -1044,7 +1033,6 @@ class FontProcessor:
         font: TTFont,
         font_path: str,
         kern_mode: str,
-        hint_mode: str,
         metadata: FontMetadata,
         is_otf: bool = False,
         stamp: bool = False,
@@ -1188,16 +1176,6 @@ class FontProcessor:
             if kern_mode == "legacy-kern-only" and has_gpos:
                 changes.append("Remove GPOS table")
 
-        # Check hinting
-        if hint_mode == "strip":
-            if self._font_has_hints(font):
-                changes.append("Strip TrueType hints")
-        elif hint_mode == "overwrite":
-            changes.append("Apply ttfautohint (overwrite)")
-        elif hint_mode == "additive":
-            if not self._font_has_hints(font):
-                changes.append("Apply ttfautohint (additive)")
-
         # Check composite outlines
         if outline_mode == "apply" and "glyf" in font:
             composite_count = sum(
@@ -1206,6 +1184,8 @@ class FontProcessor:
             )
             if composite_count:
                 changes.append(f"Flatten {composite_count} composite glyph(s)")
+            if self._font_has_meaningful_hints(font):
+                changes.append("Rehint after outline processing")
 
         # Check line adjustment
         if self.line_percent != 0:
@@ -1241,6 +1221,12 @@ class FontProcessor:
         Uses fontTools + skia-pathops for overlap removal.  Returns True
         if the outlines were modified, False if skia-pathops is not
         available or no changes were needed.
+
+        Important: removeOverlaps rewrites the glyf outlines and removes
+        per-glyph TrueType bytecode. Global hint tables such as fpgm, prep,
+        and cvt may remain, but the usable glyph-level programs are gone.
+        Any meaningful source hints must therefore be considered invalid
+        after this step.
         """
         from fontTools.ttLib.removeOverlaps import removeOverlaps
         removeOverlaps(font)
@@ -1349,7 +1335,6 @@ class FontProcessor:
         font_path: str,
         new_name: Optional[str] = None,
         remove_prefix: Optional[str] = None,
-        hint_mode: str = "skip",
         dry_run: bool = False,
         outline_mode: str = "apply",
         stamp: bool = False,
@@ -1371,10 +1356,12 @@ class FontProcessor:
             logger.info("  Source: OTF (CFF outlines, will be converted to TTF)")
 
         # Report hinting status
-        has_hints = self._font_has_hints(font)
+        has_meaningful_hints = self._font_has_meaningful_hints(font)
         hint_tables = [t for t in ("fpgm", "prep", "cvt ") if t in font]
-        if has_hints:
-            logger.info(f"  Hinting: present (tables: {', '.join(hint_tables) if hint_tables else 'glyph-level only'})")
+        if has_meaningful_hints:
+            logger.info(f"  Hinting: glyph-level present (tables: {', '.join(hint_tables) if hint_tables else 'glyph-level only'})")
+        elif hint_tables:
+            logger.info(f"  Hinting: global tables only ({', '.join(hint_tables)})")
         else:
             logger.info(f"  Hinting: none")
 
@@ -1387,7 +1374,6 @@ class FontProcessor:
             font,
             font_path,
             kern_mode,
-            hint_mode,
             metadata,
             is_otf,
             stamp,
@@ -1434,9 +1420,6 @@ class FontProcessor:
                 if kern_mode == "legacy-kern-only" and "GPOS" in font:
                     del font["GPOS"]
 
-            if hint_mode == "strip":
-                self.strip_hints(font)
-
             if outline_mode == "apply":
                 if self.simplify_outlines(font):
                     logger.info("  Simplified outlines (removed overlaps)")
@@ -1453,10 +1436,12 @@ class FontProcessor:
             font.save(output_path)
             logger.info(f"  Saved: {output_path}")
 
-            if hint_mode == "overwrite":
-                self.apply_ttfautohint(output_path)
-            elif hint_mode == "additive" and not self._font_has_hints(font):
-                self.apply_ttfautohint(output_path)
+            if outline_mode == "apply" and has_meaningful_hints:
+                # simplify_outlines() rewrites glyphs and strips per-glyph
+                # bytecode, while global hint tables can remain. Rehint the
+                # saved final outlines when the source had real glyph hints.
+                if not self.apply_ttfautohint(output_path):
+                    return False
 
             if self.line_percent != 0:
                 # Check if line spacing already matches target
@@ -1569,12 +1554,9 @@ def otf_to_ttf(font: TTFont, max_err: float = 1.0) -> None:
         maxp.maxComponentDepth = 0
 
 
-def check_dependencies(hint_mode: str, line_percent: int, outline_mode: str = "apply") -> None:
+def check_dependencies(line_percent: int, outline_mode: str = "apply") -> None:
     """Check that all required external tools are available before processing."""
     missing = []
-    if hint_mode in ("additive", "overwrite"):
-        if shutil.which("ttfautohint") is None:
-            missing.append("ttfautohint")
     if line_percent != 0:
         if shutil.which("font-line") is None:
             missing.append("font-line")
@@ -1626,7 +1608,7 @@ def main():
         epilog=f"""
 Presets:
   nv    Prepare fonts for the ebook-fonts repository. Applies NV prefix,
-        20%% line spacing. Does not modify kerning, hinting, or outlines.
+        20%% line spacing. Does not modify kerning or outlines.
   kf    Prepare KF fonts from NV fonts. Applies KF prefix, replaces NV
         prefix, adds legacy kern table, simplifies outlines. No line spacing changes.
 
@@ -1666,10 +1648,6 @@ Examples:
         help="Enable verbose output.")
     parser.add_argument("--remove-prefix", type=str,
         help="Remove a leading prefix from font names before applying the new prefix. Only works if `--name` is not used. (e.g., --remove-prefix=\"NV\")")
-    parser.add_argument("--hint", type=str,
-        choices=["skip", "additive", "overwrite", "strip"],
-        help="Hinting mode: 'skip' does nothing, 'additive' runs ttfautohint on fonts lacking hints, "
-             "'overwrite' runs ttfautohint on all fonts, 'strip' removes all TrueType hints.")
     parser.add_argument("--outline", type=str,
         choices=["apply", "skip"],
         help="Outline mode: 'apply' removes overlaps and cleans degenerate contours (requires skia-pathops), "
@@ -1681,7 +1659,7 @@ Examples:
         logging.getLogger().setLevel(logging.DEBUG)
 
     # Determine which flags were explicitly set by the user
-    manual_flags = {k for k in ("prefix", "line_percent", "kern", "hint", "outline", "remove_prefix", "name")
+    manual_flags = {k for k in ("prefix", "line_percent", "kern", "outline", "remove_prefix", "name")
                     if getattr(args, k) is not None}
 
     # If no preset and no manual flags, prompt the user to choose a preset
@@ -1709,8 +1687,6 @@ Examples:
         parser.error("--line-percent is required when not using a preset.")
     if args.kern is None:
         args.kern = "skip"
-    if args.hint is None:
-        args.hint = "skip"
     if args.outline is None:
         args.outline = "apply"
 
@@ -1719,7 +1695,7 @@ Examples:
         args.remove_prefix = None
 
     if not args.dry_run:
-        check_dependencies(args.hint, args.line_percent, args.outline)
+        check_dependencies(args.line_percent, args.outline)
 
     valid_files, invalid_files = validate_font_files(args.fonts)
 
@@ -1752,7 +1728,6 @@ Examples:
             font_path,
             args.name,
             args.remove_prefix,
-            args.hint,
             args.dry_run,
             args.outline,
             args.stamp,

@@ -45,11 +45,11 @@ class SourcererRegressionTests(unittest.TestCase):
             processor = FontProcessor(prefix="KF", line_percent=0)
             with mock.patch.object(FontProcessor, "simplify_outlines", return_value=True), \
                     mock.patch.object(FontProcessor, "clean_degenerate_contours", return_value=0), \
+                    mock.patch.object(FontProcessor, "apply_ttfautohint", return_value=True), \
                     mock.patch.object(FontProcessor, "_validate_output_font", return_value=True):
                 ok = processor.process_font(
                     kern_mode="skip",
                     font_path=str(input_path),
-                    hint_mode="skip",
                     outline_mode="apply",
                 )
 

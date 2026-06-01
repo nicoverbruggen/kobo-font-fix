@@ -48,8 +48,6 @@ class ReaderlyIntegrationTests(unittest.TestCase):
                 "0",
                 "--kern",
                 "add-legacy-kern",
-                "--hint",
-                "skip",
                 "--outline",
                 "skip",
                 *[str(path) for path in font_inputs],
@@ -90,6 +88,17 @@ class ReaderlyIntegrationTests(unittest.TestCase):
             nv_fonts = sorted(workdir.glob("NV_*.ttf"))
             self.assertEqual(len(nv_fonts), len(font_inputs))
 
+            source_regular = workdir / "Readerly-Regular.ttf"
+            nv_regular = workdir / "NV_Readerly-Regular.ttf"
+            source_font = TTFont(source_regular)
+            nv_font = TTFont(nv_regular)
+            self.assertEqual(
+                source_font["glyf"]["h"].program.getBytecode(),
+                nv_font["glyf"]["h"].program.getBytecode(),
+            )
+            source_font.close()
+            nv_font.close()
+
             self._run_kobofix(
                 "--preset",
                 "kf",
@@ -123,8 +132,6 @@ class ReaderlyIntegrationTests(unittest.TestCase):
                 "0",
                 "--kern",
                 "legacy-kern-only",
-                "--hint",
-                "skip",
                 "--outline",
                 "skip",
                 str(input_path),
@@ -142,7 +149,7 @@ class ReaderlyIntegrationTests(unittest.TestCase):
             )
             self.assertGreater(pair_count, 0)
 
-    def test_hint_strip_removes_true_type_hint_tables(self) -> None:
+    def test_kf_outline_processing_rehints_meaningfully_hinted_fonts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workdir = Path(tmpdir)
             source_path = next(path for path in self.fixture_fonts if path.name == "Readerly-Regular.ttf")
@@ -156,19 +163,21 @@ class ReaderlyIntegrationTests(unittest.TestCase):
                 "0",
                 "--kern",
                 "skip",
-                "--hint",
-                "strip",
                 "--outline",
-                "skip",
+                "apply",
                 str(input_path),
             )
 
             output_path = workdir / "KF_Readerly-Regular.ttf"
             font = TTFont(output_path)
 
-            self.assertNotIn("fpgm", font)
-            self.assertNotIn("prep", font)
-            self.assertNotIn("cvt ", font)
+            self.assertIn("fpgm", font)
+            self.assertIn("prep", font)
+            self.assertIn("cvt ", font)
+            self.assertGreater(
+                len(font["glyf"]["h"].program.getBytecode()),
+                0,
+            )
 
     def test_custom_name_updates_family_and_weight_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -185,8 +194,6 @@ class ReaderlyIntegrationTests(unittest.TestCase):
                 "--line-percent",
                 "0",
                 "--kern",
-                "skip",
-                "--hint",
                 "skip",
                 "--outline",
                 "skip",
