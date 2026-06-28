@@ -4,7 +4,7 @@
 
 **`kobofix.py` is a Python script designed to process and adjust TTF fonts for Kobo e-readers for a better reading experience with the default `kepub` renderer.**
 
-It generates a renamed font, fixes PANOSE information based on the filename, adjusts the baseline with the `font-line` utility, simplifies outlines with `skia-pathops`, flattens composite glyphs for Kobo compatibility, re-hints rewritten outlines when the source font had meaningful glyph-level TrueType hints, adds a legacy `kern` table which allows the `kepub` engine for improved rendering of kerned pairs, and validates finished output with `ots-sanitize`.
+It generates a renamed font, fixes PANOSE information based on the filename, adjusts the baseline with the `font-line` utility, simplifies outlines with `skia-pathops`, flattens composite glyphs for Kobo compatibility, re-hints rewritten outlines when the source font had meaningful glyph-level TrueType hints, adds a no-op TrueType instruction to every glyph of fonts that end up unhinted (so Kobo's iType rasterizer renders the raw outline instead of producing a vertical "wobble"), adds a legacy `kern` table which allows the `kepub` engine for improved rendering of kerned pairs, and validates finished output with `ots-sanitize`.
 
 > [!NOTE]
 > You can also use this to modify or fix your own, legally acquired fonts, assuming you are legally allowed to do so. The author of this script does not recommend modifying fonts which don't specify in their license agreement that they can be modified. Using this script is done at your own risk. 
@@ -59,9 +59,23 @@ The recommended preset will prepare your fonts for use on a Kobo device. It's th
 6. **Kern pairs from the GPOS table are copied to the legacy `kern` table.** This only applies to fonts that have a GPOS table, which is used for kerning in modern fonts. When there are more pairs than the format 0 limit (10,920), pairs are prioritized by Unicode range so that common Latin kerning is preserved.
 7. **Outlines are simplified.** Overlapping contours are merged, degenerate (zero-area) contours are removed, and composite glyphs are flattened to simple outlines. This improves rendering consistency on e-ink displays. Can be disabled with `--outline skip`.
 8. **Meaningfully hinted fonts are re-hinted after outline processing.** Because outline rewriting invalidates old glyph bytecode, `ttfautohint` is run on the final output only when the source font had real glyph-level TrueType hints.
-9. **The final written font is validated with `ots-sanitize`.** If validation fails, that font is treated as a processing failure and the overall command exits non-zero.
+9. **Unhinted fonts get a no-op instruction added to every glyph.** A font with no per-glyph instructions falls into iType's *automatic* grid-fitting, which snaps each glyph's top to a whole pixel row depending on its sub-pixel position, so the same letter renders at slightly different heights from one place to the next — a visible vertical "wobble". iType routes a glyph that carries *any* instructions through its interpreter instead, bypassing the auto-grid-fit. So for any font that ends up unhinted (i.e. it was not re-hinted in step 8), every outline glyph is given a single one-byte no-op program (`SVTCA[Y]`, opcode `0x00`) that moves no points: the outline is emitted byte-for-byte unchanged, but iType now renders the raw scaled outline with no wobble. Editing the `gasp` table does *not* fix this (iType parses but never consults `gasp` while rendering), so per-glyph bytecode is the only font-level lever. Hinted fonts keep their existing instructions. See [The Kobo "wobble" and how it's fixed](#the-kobo-wobble-and-how-its-fixed) for the full mechanism.
+10. **The final written font is validated with `ots-sanitize`.** If validation fails, that font is treated as a processing failure and the overall command exits non-zero.
 
 You can also use a different preset. For example, the NV preset applies 20% line spacing, skips kerning, and leaves outlines untouched. See [Customization](#customization) and [Presets](#presets) for details.
+
+## The Kobo "wobble" and how it's fixed
+
+Some fonts render with a subtle vertical instability on Kobo e-readers: the *same* letter appears at slightly different heights in different places (for example, an `a` rasterized 26 px tall in one spot and 27 px in another, at the same size). The text looks faintly uneven, as if it were trembling. The same fonts render fine on desktop and on other e-readers — the defect is specific to Kobo's rendering path.
+
+**Cause.** Kobo's rendering stack uses Monotype's **iType** rasterizer (behind a FreeType-compatible API). When a glyph carries **no per-glyph TrueType instructions**, iType applies its own *automatic* grid-fitting, snapping the glyph's top edge to a whole pixel row. That snap depends on the glyph's sub-pixel position, so two instances of the same letter at slightly different offsets get snapped to different rows — the wobble. Many free fonts ship with global hint programs (`fpgm`/`prep`/`cvt`) but no actual per-glyph instructions, which is exactly the case that triggers this.
+
+**Why the obvious font-level edits don't work.** Editing the `gasp` table has no effect: iType parses `gasp` but never consults it while rendering. Stripping the `fpgm`/`prep`/`cvt` tables doesn't help either, because uninstructed glyphs never reach the interpreter that reads them. The one input the engine actually obeys at the font level is **per-glyph bytecode**.
+
+**The fix.** A glyph that carries *any* instructions is routed through iType's interpreter instead of the auto-grid-fit. So for every font that ends up unhinted, the **KF preset** (this is a Kobo-specific fix, so it is limited to that preset) adds a single one-byte **no-op** program — `SVTCA[Y]` (opcode `0x00`), which sets the freedom and projection vectors to the y-axis and moves no points — to each outline glyph. The outline is emitted byte-for-byte unchanged, but iType now renders the raw scaled outline with no grid-fitting, so every instance of a glyph has identical geometry and the wobble is gone. Composite glyphs are handled too (they receive the `WE_HAVE_INSTRUCTIONS` component flag), and `maxp` is updated to keep the font valid. Fonts that already ship real glyph-level hints are left alone here and are instead re-hinted with `ttfautohint` after outline rewriting (step 8 above).
+
+> [!NOTE]
+> A device-level alternative exists: a Kobo mod (built on [NickelHook](https://github.com/pgaskin/NickelHook)) can hook `FT_Load_Glyph` and force `FT_LOAD_NO_HINTING`, fixing every font at once without touching the files. The no-op approach here is the font-level equivalent — it works on an unmodified Kobo and leaves the outlines untouched.
 
 ## Customization
 
@@ -79,7 +93,7 @@ The script includes presets for common workflows. If no preset or flags are prov
 
 ### KF preset (for Kobo devices)
 
-Prepares KF fonts from NV fonts for use on Kobo devices. This preset applies the KF prefix while stripping other common prefixes, adds a legacy kern table, simplifies outlines, and flattens composite glyphs. If the source font was meaningfully hinted, the final rewritten output is re-hinted since this is required after simplifying outlines. No line spacing changes are made with this preset.
+Prepares KF fonts from NV fonts for use on Kobo devices. This preset applies the KF prefix while stripping other common prefixes, adds a legacy kern table, simplifies outlines, and flattens composite glyphs. If the source font was meaningfully hinted, the final rewritten output is re-hinted since this is required after simplifying outlines; if it ends up unhinted, every glyph gets a no-op instruction to suppress iType's wobble (see [The Kobo "wobble" and how it's fixed](#the-kobo-wobble-and-how-its-fixed)). No line spacing changes are made with this preset.
 
 ```bash
 ./kobofix.py --preset kf *.ttf

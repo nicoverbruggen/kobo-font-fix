@@ -17,6 +17,10 @@ Processes TrueType fonts to improve compatibility with Kobo e-readers:
 - Flattening TrueType composite glyphs to avoid Kobo renderer artifacts
 - Hinting: automatically re-running ttfautohint after outline rewriting when
   the source font had meaningful glyph-level TrueType hints
+- Wobble fix (KF preset): giving every glyph of an otherwise-unhinted font a
+  no-op TrueType instruction, so Kobo's iType rasterizer runs its interpreter
+  instead of its auto-grid-fit (which snaps the same letter to different pixel
+  heights, a vertical "wobble"). The outline is left unchanged
 
 Supports --dry-run to preview what would change without modifying files.
 Includes NV and KF presets for common workflows, or can be fully
@@ -45,6 +49,7 @@ from dataclasses import dataclass
 from typing import Dict, Tuple, Optional, List
 
 from fontTools.ttLib import TTFont, newTable
+from fontTools.ttLib.tables import ttProgram
 from fontTools.ttLib.tables._k_e_r_n import KernTable_format_0
 
 # -------------
@@ -917,22 +922,87 @@ class FontProcessor:
     # Hinting methods
     # ============================================================
 
-    @staticmethod
-    def _font_has_meaningful_hints(font: TTFont) -> bool:
+    # A single SVTCA[Y] (opcode 0x00): it sets the projection and freedom
+    # vectors to the y-axis and moves no points. Giving an otherwise
+    # uninstructed glyph this one-byte program is the whole Kobo wobble fix
+    # (see below) — the outline is emitted byte-for-byte unchanged.
+    _NOOP_BYTECODE = b"\x00"
+
+    @classmethod
+    def _font_has_meaningful_hints(cls, font: TTFont) -> bool:
         """Check whether real glyphs contain TrueType bytecode.
 
         Global tables such as prep/fpgm/cvt are not enough: some fonts carry
-        only scan-conversion setup or .notdef bytecode. Those fonts should not
-        be considered meaningfully hinted for automatic rehinting.
+        only scan-conversion setup or .notdef bytecode. The no-op program we
+        inject for the Kobo wobble fix is likewise not "meaningful" hinting, so
+        a re-run still recognises a previously processed font as unhinted and
+        leaves the no-op in place instead of trying to ttfautohint it.
         """
         if "glyf" in font:
             for glyph_name in font.getGlyphOrder():
                 if glyph_name == ".notdef":
                     continue
                 glyph = font["glyf"][glyph_name]
-                if hasattr(glyph, 'program') and glyph.program and glyph.program.getAssembly():
+                if not (hasattr(glyph, 'program') and glyph.program):
+                    continue
+                bytecode = glyph.program.getBytecode()
+                if bytecode and bytecode != cls._NOOP_BYTECODE:
                     return True
         return False
+
+    @classmethod
+    def _font_needs_noop_hints(cls, font: TTFont) -> bool:
+        """Whether any outline glyph still lacks an instruction program.
+
+        An uninstructed glyph falls into iType's automatic grid-fitting, which
+        snaps the glyph's top to a whole pixel row depending on its sub-pixel
+        position — the same letter lands at different heights (the vertical
+        "wobble" on Kobo). A glyph carrying *any* instructions is routed to
+        iType's interpreter instead, which runs our no-op and emits the raw
+        scaled outline. Editing gasp does nothing here: iType parses but never
+        reads gasp while rendering, so per-glyph bytecode is the only lever.
+        """
+        if "glyf" not in font:
+            return False
+        glyf = font["glyf"]
+        for name in font.getGlyphOrder():
+            glyph = glyf[name]
+            if glyph.numberOfContours == 0:  # empty glyph (space, etc.)
+                continue
+            if hasattr(glyph, "program") and glyph.program and glyph.program.getBytecode():
+                continue
+            return True
+        return False
+
+    @classmethod
+    def _add_noop_hints(cls, font: TTFont) -> int:
+        """Give every uninstructed outline glyph a no-op program.
+
+        Returns the number of glyphs instrumented. Composite glyphs are handled
+        too: fontTools sets each composite's WE_HAVE_INSTRUCTIONS component flag
+        when a program is present at compile time. maxp.maxSizeOfInstructions is
+        bumped to cover the program (fontTools does not recompute it on save).
+        """
+        if "glyf" not in font:
+            return 0
+        glyf = font["glyf"]
+        count = 0
+        for name in font.getGlyphOrder():
+            glyph = glyf[name]
+            if glyph.numberOfContours == 0:
+                continue
+            if hasattr(glyph, "program") and glyph.program and glyph.program.getBytecode():
+                continue
+            prog = ttProgram.Program()
+            prog.fromBytecode(cls._NOOP_BYTECODE)
+            glyph.program = prog
+            count += 1
+        if count and "maxp" in font:
+            maxp = font["maxp"]
+            need = len(cls._NOOP_BYTECODE)
+            if getattr(maxp, "maxSizeOfInstructions", 0) < need:
+                maxp.maxSizeOfInstructions = need
+        return count
 
     def apply_ttfautohint(self, font_path: str) -> bool:
         """Run ttfautohint on a saved font file, replacing it in-place.
@@ -1187,6 +1257,14 @@ class FontProcessor:
             if self._font_has_meaningful_hints(font):
                 changes.append("Rehint after outline processing")
 
+        # An unhinted font's glyphs fall into iType's auto-grid-fit and wobble.
+        # Adding a per-glyph no-op program routes them through the interpreter
+        # instead. Kobo-specific, so only under the KF preset; skipped for fonts
+        # that already carry real hints.
+        if (self.prefix == "KF" and not self._font_has_meaningful_hints(font)
+                and self._font_needs_noop_hints(font)):
+            changes.append("Add no-op hints to uninstructed glyphs (fix iType wobble)")
+
         # Check line adjustment
         if self.line_percent != 0:
             if "OS/2" in font and "head" in font:
@@ -1431,6 +1509,16 @@ class FontProcessor:
                 flattened = self.flatten_composites(font)
                 if flattened:
                     logger.info(f"  Flattened {flattened} composite glyph(s)")
+
+            # The output stays unhinted unless source glyph hints get rehinted
+            # below. Give an unhinted font's glyphs a no-op program so iType
+            # runs its interpreter instead of the auto-grid-fit that wobbles.
+            # This is a Kobo-specific fix, so it is limited to the KF preset.
+            # Runs after outline processing so flattened glyphs are covered too.
+            if self.prefix == "KF" and not has_meaningful_hints:
+                instrumented = self._add_noop_hints(font)
+                if instrumented:
+                    logger.info(f"  Added no-op hints to {instrumented} glyph(s) (fix iType wobble)")
 
             output_path = self._generate_output_path(font_path, metadata)
             font.save(output_path)
