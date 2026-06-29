@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fontTools.ttLib import TTFont
 
+from kobofix import FontProcessor
 from tests.fixture_loader import ensure_readerly_fixtures
 
 
@@ -149,7 +150,7 @@ class ReaderlyIntegrationTests(unittest.TestCase):
             )
             self.assertGreater(pair_count, 0)
 
-    def test_kf_outline_processing_rehints_meaningfully_hinted_fonts(self) -> None:
+    def test_kf_outline_processing_replaces_meaningful_hints_with_noop(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workdir = Path(tmpdir)
             source_path = next(path for path in self.fixture_fonts if path.name == "Readerly-Regular.ttf")
@@ -171,13 +172,10 @@ class ReaderlyIntegrationTests(unittest.TestCase):
             output_path = workdir / "KF_Readerly-Regular.ttf"
             font = TTFont(output_path)
 
-            self.assertIn("fpgm", font)
-            self.assertIn("prep", font)
-            self.assertIn("cvt ", font)
-            self.assertGreater(
-                len(font["glyf"]["h"].program.getBytecode()),
-                0,
-            )
+            self.assertNotIn("fpgm", font)
+            self.assertNotIn("prep", font)
+            self.assertNotIn("cvt ", font)
+            self.assertEqual(font["glyf"]["h"].program.getBytecode(), FontProcessor._NOOP_BYTECODE)
 
     def test_custom_name_updates_family_and_weight_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

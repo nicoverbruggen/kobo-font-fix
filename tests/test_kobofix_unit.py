@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from fontTools.ttLib import TTFont, newTable
+from fontTools.ttLib.tables import ttProgram
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
@@ -191,6 +192,55 @@ class KobofixUnitTests(unittest.TestCase):
             FontProcessor._glyph_priority("quotedblright", cmap_reverse),
             FontProcessor._glyph_priority("ellipsis", cmap_reverse),
         )
+
+    def test_kf_noop_hinting_replaces_existing_hints_and_tables(self) -> None:
+        pen = TTGlyphPen(None)
+        pen.moveTo((0, 0))
+        pen.lineTo((100, 0))
+        pen.lineTo((100, 100))
+        pen.lineTo((0, 100))
+        pen.closePath()
+        glyph = pen.glyph()
+        original_program = ttProgram.Program()
+        original_program.fromBytecode(b"\xb0\x01")
+        glyph.program = original_program
+
+        glyphs = {
+            ".notdef": TTGlyphPen(None).glyph(),
+            "A": glyph,
+        }
+
+        builder = FontBuilder(1000, isTTF=True)
+        builder.setupGlyphOrder(list(glyphs))
+        builder.setupGlyf(glyphs)
+        builder.setupHorizontalMetrics({
+            ".notdef": (500, 0),
+            "A": (500, 0),
+        })
+        builder.setupHorizontalHeader(ascent=800, descent=-200)
+        builder.setupMaxp()
+        font = builder.font
+
+        for tag in ("fpgm", "prep"):
+            table = newTable(tag)
+            table.program = ttProgram.Program()
+            table.program.fromBytecode(b"\xb0\x00")
+            font[tag] = table
+        font["cvt "] = newTable("cvt ")
+        font["cvt "].values = [0]
+
+        removed = FontProcessor._strip_hinting_tables(font)
+        changed = FontProcessor._add_noop_hints(font)
+
+        self.assertEqual(removed, 3)
+        self.assertEqual(changed, 1)
+        self.assertNotIn("fpgm", font)
+        self.assertNotIn("prep", font)
+        self.assertNotIn("cvt ", font)
+        self.assertEqual(font["glyf"]["A"].program.getBytecode(), FontProcessor._NOOP_BYTECODE)
+        self.assertFalse(FontProcessor._font_has_meaningful_hints(font))
+        self.assertFalse(FontProcessor._font_needs_noop_hints(font))
+        self.assertEqual(font["maxp"].maxSizeOfInstructions, 1)
 
     def test_validate_output_font_fails_when_ots_is_missing(self) -> None:
         with self.assertLogs("kobofix", level="ERROR") as captured:

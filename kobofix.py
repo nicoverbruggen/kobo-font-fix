@@ -15,12 +15,12 @@ Processes TrueType fonts to improve compatibility with Kobo e-readers:
   into a legacy kern table, prioritized by Unicode range to fit within
   format 0 size constraints
 - Flattening TrueType composite glyphs to avoid Kobo renderer artifacts
-- Hinting: automatically re-running ttfautohint after outline rewriting when
-  the source font had meaningful glyph-level TrueType hints
-- Wobble fix (KF preset): giving every glyph of an otherwise-unhinted font a
-  no-op TrueType instruction, so Kobo's iType rasterizer runs its interpreter
-  instead of its auto-grid-fit (which snaps the same letter to different pixel
-  heights, a vertical "wobble"). The outline is left unchanged
+- Hinting: automatically re-running ttfautohint after outline rewriting for
+  non-KF outputs when the source font had meaningful glyph-level TrueType hints
+- Wobble fix (KF preset): stripping hinting and giving every outline glyph the
+  same no-op TrueType instruction, so Kobo's iType rasterizer runs its
+  interpreter instead of its auto-grid-fit (which snaps the same letter to
+  different pixel heights, a vertical "wobble"). The outline is left unchanged
 
 Supports --dry-run to preview what would change without modifying files.
 Includes NV and KF presets for common workflows, or can be fully
@@ -927,6 +927,21 @@ class FontProcessor:
     # uninstructed glyph this one-byte program is the whole Kobo wobble fix
     # (see below) — the outline is emitted byte-for-byte unchanged.
     _NOOP_BYTECODE = b"\x00"
+    _HINTING_TABLES = (
+        "cvt ",
+        "cvar",
+        "fpgm",
+        "prep",
+        "hdmx",
+        "LTSH",
+        "VDMX",
+        "gasp",
+        "TSI0",
+        "TSI1",
+        "TSI2",
+        "TSI3",
+        "TSI5",
+    )
 
     @classmethod
     def _font_has_meaningful_hints(cls, font: TTFont) -> bool:
@@ -952,15 +967,11 @@ class FontProcessor:
 
     @classmethod
     def _font_needs_noop_hints(cls, font: TTFont) -> bool:
-        """Whether any outline glyph still lacks an instruction program.
+        """Whether any outline glyph lacks the standard no-op program.
 
-        An uninstructed glyph falls into iType's automatic grid-fitting, which
-        snaps the glyph's top to a whole pixel row depending on its sub-pixel
-        position — the same letter lands at different heights (the vertical
-        "wobble" on Kobo). A glyph carrying *any* instructions is routed to
-        iType's interpreter instead, which runs our no-op and emits the raw
-        scaled outline. Editing gasp does nothing here: iType parses but never
-        reads gasp while rendering, so per-glyph bytecode is the only lever.
+        KF output deliberately uses one uniform no-op program for every outline
+        glyph. That removes source hinting while still routing iType through
+        its interpreter instead of the automatic grid-fitting path that wobbles.
         """
         if "glyf" not in font:
             return False
@@ -969,19 +980,20 @@ class FontProcessor:
             glyph = glyf[name]
             if glyph.numberOfContours == 0:  # empty glyph (space, etc.)
                 continue
-            if hasattr(glyph, "program") and glyph.program and glyph.program.getBytecode():
+            if (hasattr(glyph, "program") and glyph.program
+                    and glyph.program.getBytecode() == cls._NOOP_BYTECODE):
                 continue
             return True
         return False
 
     @classmethod
     def _add_noop_hints(cls, font: TTFont) -> int:
-        """Give every uninstructed outline glyph a no-op program.
+        """Give every outline glyph the same no-op program.
 
-        Returns the number of glyphs instrumented. Composite glyphs are handled
-        too: fontTools sets each composite's WE_HAVE_INSTRUCTIONS component flag
-        when a program is present at compile time. maxp.maxSizeOfInstructions is
-        bumped to cover the program (fontTools does not recompute it on save).
+        Returns the number of glyphs changed. Composite glyphs are handled too:
+        fontTools sets each composite's WE_HAVE_INSTRUCTIONS component flag when
+        a program is present at compile time. maxp hinting fields are reset for
+        the no-op-only programs.
         """
         if "glyf" not in font:
             return 0
@@ -991,18 +1003,38 @@ class FontProcessor:
             glyph = glyf[name]
             if glyph.numberOfContours == 0:
                 continue
-            if hasattr(glyph, "program") and glyph.program and glyph.program.getBytecode():
+            if (hasattr(glyph, "program") and glyph.program
+                    and glyph.program.getBytecode() == cls._NOOP_BYTECODE):
                 continue
             prog = ttProgram.Program()
             prog.fromBytecode(cls._NOOP_BYTECODE)
             glyph.program = prog
             count += 1
-        if count and "maxp" in font:
-            maxp = font["maxp"]
-            need = len(cls._NOOP_BYTECODE)
-            if getattr(maxp, "maxSizeOfInstructions", 0) < need:
-                maxp.maxSizeOfInstructions = need
+        cls._reset_noop_hinting_limits(font)
         return count
+
+    @classmethod
+    def _strip_hinting_tables(cls, font: TTFont) -> int:
+        """Remove global TrueType hinting and hint-derived metric tables."""
+        removed = 0
+        for tag in cls._HINTING_TABLES:
+            if tag in font:
+                del font[tag]
+                removed += 1
+        return removed
+
+    @classmethod
+    def _reset_noop_hinting_limits(cls, font: TTFont) -> None:
+        if "maxp" not in font:
+            return
+        maxp = font["maxp"]
+        maxp.maxZones = 1
+        maxp.maxTwilightPoints = 0
+        maxp.maxStorage = 0
+        maxp.maxFunctionDefs = 0
+        maxp.maxInstructionDefs = 0
+        maxp.maxStackElements = 0
+        maxp.maxSizeOfInstructions = len(cls._NOOP_BYTECODE)
 
     def apply_ttfautohint(self, font_path: str) -> bool:
         """Run ttfautohint on a saved font file, replacing it in-place.
@@ -1254,16 +1286,16 @@ class FontProcessor:
             )
             if composite_count:
                 changes.append(f"Flatten {composite_count} composite glyph(s)")
-            if self._font_has_meaningful_hints(font):
+            if self.prefix != "KF" and self._font_has_meaningful_hints(font):
                 changes.append("Rehint after outline processing")
 
-        # An unhinted font's glyphs fall into iType's auto-grid-fit and wobble.
-        # Adding a per-glyph no-op program routes them through the interpreter
-        # instead. Kobo-specific, so only under the KF preset; skipped for fonts
-        # that already carry real hints.
-        if (self.prefix == "KF" and not self._font_has_meaningful_hints(font)
-                and self._font_needs_noop_hints(font)):
-            changes.append("Add no-op hints to uninstructed glyphs (fix iType wobble)")
+        # KF output deliberately removes TrueType hinting and uses a uniform
+        # no-op per-glyph program. This routes Kobo iType through its
+        # interpreter without grid-fitting the outlines.
+        if self.prefix == "KF":
+            has_hint_tables = any(tag in font for tag in self._HINTING_TABLES)
+            if has_hint_tables or self._font_needs_noop_hints(font):
+                changes.append("Strip hinting and set no-op glyph instructions (fix iType wobble)")
 
         # Check line adjustment
         if self.line_percent != 0:
@@ -1510,21 +1542,22 @@ class FontProcessor:
                 if flattened:
                     logger.info(f"  Flattened {flattened} composite glyph(s)")
 
-            # The output stays unhinted unless source glyph hints get rehinted
-            # below. Give an unhinted font's glyphs a no-op program so iType
-            # runs its interpreter instead of the auto-grid-fit that wobbles.
-            # This is a Kobo-specific fix, so it is limited to the KF preset.
+            # KF output strips hinting completely, then adds one uniform no-op
+            # program to every outline glyph so iType avoids its auto-grid-fit.
             # Runs after outline processing so flattened glyphs are covered too.
-            if self.prefix == "KF" and not has_meaningful_hints:
+            if self.prefix == "KF":
+                stripped = self._strip_hinting_tables(font)
+                if stripped:
+                    logger.info(f"  Removed {stripped} hinting table(s)")
                 instrumented = self._add_noop_hints(font)
                 if instrumented:
-                    logger.info(f"  Added no-op hints to {instrumented} glyph(s) (fix iType wobble)")
+                    logger.info(f"  Set no-op instructions on {instrumented} glyph(s) (fix iType wobble)")
 
             output_path = self._generate_output_path(font_path, metadata)
             font.save(output_path)
             logger.info(f"  Saved: {output_path}")
 
-            if outline_mode == "apply" and has_meaningful_hints:
+            if self.prefix != "KF" and outline_mode == "apply" and has_meaningful_hints:
                 # simplify_outlines() rewrites glyphs and strips per-glyph
                 # bytecode, while global hint tables can remain. Rehint the
                 # saved final outlines when the source had real glyph hints.
@@ -1643,19 +1676,24 @@ def otf_to_ttf(font: TTFont, max_err: float = 1.0) -> None:
         maxp.maxComponentDepth = 0
 
 
-def check_dependencies() -> None:
+def check_dependencies(
+    require_font_line: bool = True,
+    require_pathops: bool = True,
+    require_ttfautohint: bool = True,
+) -> None:
     """Check that all required external tools are available before processing."""
     missing = []
-    if shutil.which("font-line") is None:
+    if require_font_line and shutil.which("font-line") is None:
         missing.append("font-line")
-    if shutil.which("ttfautohint") is None:
+    if require_ttfautohint and shutil.which("ttfautohint") is None:
         missing.append("ttfautohint")
     if FontProcessor._find_available_ots() is None:
         missing.append("ots-sanitize")
-    try:
-        import pathops  # noqa: F401
-    except ImportError:
-        missing.append("skia-pathops (pip install skia-pathops)")
+    if require_pathops:
+        try:
+            import pathops  # noqa: F401
+        except ImportError:
+            missing.append("skia-pathops (pip install skia-pathops)")
     if missing:
         logger.error(f"Missing required dependencies: {', '.join(missing)}")
         logger.error("Please install them before running this script.")
@@ -1785,7 +1823,11 @@ Examples:
         logger.warning("--name and --remove-prefix were both specified. --name takes precedence; --remove-prefix will be ignored.")
         args.remove_prefix = None
 
-    check_dependencies()
+    check_dependencies(
+        require_font_line=args.line_percent != 0,
+        require_pathops=args.outline == "apply",
+        require_ttfautohint=args.prefix != "KF" and args.outline == "apply",
+    )
 
     valid_files, invalid_files = validate_font_files(args.fonts)
 
