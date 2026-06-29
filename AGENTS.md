@@ -76,8 +76,9 @@ python3 kobofix.py --preset nv *.ttf
   ```
 
 - Prefer running that inside the documented Docker or Podman container.
-- The integration tests download the latest `Readerly.zip` release into
-  `./tests/fixtures` on first run, then reuse the extracted fonts.
+- The integration tests download the latest `Libron.zip` release into
+  `./tests/fixtures` and the latest `Sourcerer.zip` release into
+  `./tests/fixtures/sourcerer` on first run, then reuse the extracted fonts.
 - Generated fonts can be validated directly with:
 
   ```bash

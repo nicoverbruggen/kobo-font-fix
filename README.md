@@ -2,7 +2,7 @@
 
 ## Overview
 
-**`kobofix.py` is a Python script designed to process and adjust TTF fonts for Kobo e-readers for a better reading experience with the default `kepub` renderer.**
+**`kobofix.py` is a Python script designed to process and adjust TrueType fonts for Kobo e-readers for a better reading experience with the default `kepub` renderer.**
 
 It generates a renamed font, fixes PANOSE information based on the filename, adjusts the baseline with the `font-line` utility, simplifies outlines with `skia-pathops`, flattens composite glyphs for Kobo compatibility, strips TrueType hinting from KF fonts and gives every outline glyph the same no-op TrueType instruction (so Kobo's iType rasterizer renders the raw outline instead of producing a vertical "wobble"), adds a legacy `kern` table which allows the `kepub` engine for improved rendering of kerned pairs, and validates finished output with `ots-sanitize`.
 
@@ -11,7 +11,7 @@ It generates a renamed font, fixes PANOSE information based on the filename, adj
 
 ## Requirements
 
-Docker or Podman must be installed. The [`fntbld-oci`](https://github.com/nicoverbruggen/fntbld-oci/pkgs/container/fntbld-oci) container is used to build the actual fonts.
+Docker or Podman is recommended. The [`fntbld-oci`](https://github.com/nicoverbruggen/fntbld-oci/pkgs/container/fntbld-oci) container is the easiest way to build the actual fonts.
 
 Alternatively, you can also install the dependencies and run the script locally. Python 3, FontTools, and `ots-sanitize` are always required. Depending on the enabled operations, you may also need `font-line`, `skia-pathops`, and `ttfautohint`. The KF preset does not use `ttfautohint`.
 
@@ -65,10 +65,10 @@ You can also use a different preset. For example, the NV preset applies 20% line
 
 ## The Kobo "wobble" and how it's fixed
 
-Some fonts render with a subtle vertical instability on Kobo e-readers: the *same* letter appears at slightly different heights in different places (for example, an `a` rasterized 26 px tall in one spot and 27 px in another, at the same size). The text looks faintly uneven, as if it were trembling. The same fonts render fine on desktop and on other e-readers — the defect is specific to Kobo's rendering path. Adding a no-op program actually forces `FT_LOAD_NO_HINTING`, which results in correct font rendering. You can learn more about this finding in the linked repository in the note below.
+Some fonts render with a subtle vertical instability on Kobo e-readers: the *same* letter appears at slightly different heights in different places (for example, an `a` rasterized 26 px tall in one spot and 27 px in another, at the same size). The text looks faintly uneven, as if it were trembling. The same fonts render fine on desktop and on other e-readers — the defect is specific to Kobo's rendering path. On Kobo's iType path, adding a glyph program causes the renderer to use the equivalent of `FT_LOAD_NO_HINTING`, which results in correct font rendering; this script adds a no-op program so that condition is met without moving outline points. You can learn more about this finding in the linked repository in the note below.
 
 > [!NOTE]
-> A device-level alternative exists: a Kobo mod named [NickelHintFix](https://github.com/nicoverbruggen/NickelHintFix) can hook `FT_Load_Glyph` and force `FT_LOAD_NO_HINTING`, fixing every font at once without touching the files. The no-op approach here is the font-level equivalent and it works on an unmodified Kobo and leaves the outlines untouched.
+> A device-level alternative exists: a Kobo mod named [NickelHintFix](https://github.com/nicoverbruggen/NickelHintFix) can hook `FT_Load_Glyph` and force `FT_LOAD_NO_HINTING`, fixing every font at once without touching the files. The no-op approach here is the font-level counterpart: it satisfies the glyph-program condition that leads Kobo to the same effective rendering mode, works on an unmodified Kobo, and leaves the outlines untouched.
 
 ## Customization
 
@@ -116,7 +116,7 @@ You can also specify all flags manually. For example, you can run:
 
 ## Testing
 
-The repository includes a `unittest` suite that covers targeted font-table logic, end-to-end processing against real Readerly fonts, and the validator's OTS resolution logic.
+The repository includes a `unittest` suite that covers targeted font-table logic, end-to-end processing against real Libron fonts, a Sourcerer composite-outline regression fixture, OTF-to-TTF conversion behavior, and the validator's OTS resolution logic.
 
 Run the full suite with:
 
@@ -124,7 +124,7 @@ Run the full suite with:
 python3 -m unittest discover -s tests -v
 ```
 
-On first run, the integration tests download the latest `Readerly.zip` release into `./tests/fixtures` and reuse those extracted fonts on later runs.
+On first run, the integration tests download the latest `Libron.zip` release into `./tests/fixtures` and the latest `Sourcerer.zip` release into `./tests/fixtures/sourcerer`, then reuse those extracted fonts on later runs.
 
 You can also validate generated fonts directly with:
 

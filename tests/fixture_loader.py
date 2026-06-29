@@ -6,29 +6,29 @@ import zipfile
 from pathlib import Path
 
 
-READERLY_ZIP_URL = "https://github.com/nicoverbruggen/readerly/releases/latest/download/Readerly.zip"
+LIBRON_ZIP_URL = "https://github.com/nicoverbruggen/libron/releases/latest/download/Libron.zip"
 SOURCERER_ZIP_URL = "https://github.com/nicoverbruggen/sourcerer/releases/latest/download/Sourcerer.zip"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
-def ensure_readerly_fixtures() -> list[Path]:
-    """Download and extract the Readerly font fixtures on first use."""
+def ensure_libron_fixtures() -> list[Path]:
+    """Download and extract the Libron font fixtures on first use."""
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
 
-    zip_path = FIXTURES_DIR / "Readerly.zip"
+    zip_path = FIXTURES_DIR / "Libron.zip"
 
     if not zip_path.exists():
-        with urllib.request.urlopen(READERLY_ZIP_URL) as response, zip_path.open("wb") as output:
+        with urllib.request.urlopen(LIBRON_ZIP_URL) as response, zip_path.open("wb") as output:
             shutil.copyfileobj(response, output)
 
-    fonts = sorted(FIXTURES_DIR.glob("Readerly*.ttf"))
+    fonts = sorted(FIXTURES_DIR.glob("Libron*.ttf"))
     if not fonts:
         with zipfile.ZipFile(zip_path) as archive:
             archive.extractall(FIXTURES_DIR)
 
-    fonts = sorted(FIXTURES_DIR.glob("Readerly*.ttf"))
+    fonts = sorted(FIXTURES_DIR.glob("Libron*.ttf"))
     if not fonts:
-        raise RuntimeError("Readerly.zip exists but no .ttf files were extracted")
+        raise RuntimeError("Libron.zip exists but no .ttf files were extracted")
 
     return fonts
 

@@ -3,12 +3,14 @@ from __future__ import annotations
 import types
 import unittest
 import inspect
+import tempfile
 from pathlib import Path
 from unittest import mock
 
 from fontTools.ttLib import TTFont, newTable
 from fontTools.ttLib.tables import ttProgram
 from fontTools.fontBuilder import FontBuilder
+from fontTools.pens.t2CharStringPen import T2CharStringPen
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
 from kobofix import FontMetadata, FontProcessor
@@ -311,6 +313,87 @@ class KobofixUnitTests(unittest.TestCase):
             ),
             (0, 0, 100, 100),
         )
+
+    def test_process_otf_converts_to_ttf_and_removes_old_cff_names(self) -> None:
+        glyph_order = [".notdef", "A"]
+
+        empty_pen = T2CharStringPen(500, None)
+        a_pen = T2CharStringPen(500, None)
+        a_pen.moveTo((0, 0))
+        a_pen.lineTo((400, 0))
+        a_pen.lineTo((400, 600))
+        a_pen.lineTo((0, 600))
+        a_pen.closePath()
+
+        charstrings = {
+            ".notdef": empty_pen.getCharString(),
+            "A": a_pen.getCharString(),
+        }
+
+        builder = FontBuilder(1000, isTTF=False)
+        builder.setupGlyphOrder(glyph_order)
+        builder.setupCharacterMap({ord("A"): "A"})
+        builder.setupHorizontalMetrics({
+            ".notdef": (500, 0),
+            "A": (500, 0),
+        })
+        builder.setupHorizontalHeader(ascent=800, descent=-200)
+        builder.setupNameTable({
+            "familyName": "Old CFF Name",
+            "styleName": "Regular",
+            "uniqueFontIdentifier": "Old CFF Name Regular",
+            "fullName": "Old CFF Name Regular",
+            "psName": "OldCFFName-Regular",
+            "version": "Version 1.000",
+        })
+        builder.setupOS2(
+            sTypoAscender=800,
+            sTypoDescender=-200,
+            usWinAscent=800,
+            usWinDescent=200,
+        )
+        builder.setupPost()
+        builder.setupCFF(
+            "OldCFFName-Regular",
+            {
+                "FullName": "Old CFF Name Regular",
+                "FamilyName": "Old CFF Name",
+                "Weight": "Regular",
+            },
+            charstrings,
+            {},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "Converted-Regular.otf"
+            builder.save(input_path)
+
+            processor = FontProcessor(prefix="KF", line_percent=0)
+            with mock.patch.object(FontProcessor, "_validate_output_font", return_value=True):
+                ok = processor.process_font(
+                    kern_mode="skip",
+                    font_path=str(input_path),
+                    new_name="Converted Serif",
+                    outline_mode="skip",
+                )
+
+            self.assertTrue(ok)
+            output_path = Path(tmpdir) / "KF_Converted_Serif-Regular.ttf"
+            output_font = TTFont(output_path)
+
+            self.assertEqual(output_font.sfntVersion, "\x00\x01\x00\x00")
+            self.assertIn("glyf", output_font)
+            self.assertNotIn("CFF ", output_font)
+            self.assertEqual(output_font["name"].getBestFamilyName(), "KF Converted Serif")
+            self.assertEqual(output_font["name"].getBestFullName(), "KF Converted Serif")
+            self.assertEqual(output_font["name"].getName(6, 3, 1, 0x0409).toUnicode(), "KF_Converted-Serif")
+
+            retained_names = [
+                record.toUnicode()
+                for record in output_font["name"].names
+                if "Old CFF Name" in record.toUnicode() or "OldCFFName" in record.toUnicode()
+            ]
+            self.assertEqual(retained_names, [])
 
 
 if __name__ == "__main__":

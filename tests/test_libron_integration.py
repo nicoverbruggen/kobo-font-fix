@@ -10,19 +10,19 @@ from pathlib import Path
 from fontTools.ttLib import TTFont
 
 from kobofix import FontProcessor
-from tests.fixture_loader import ensure_readerly_fixtures
+from tests.fixture_loader import ensure_libron_fixtures
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "kobofix.py"
 
 
-class ReaderlyIntegrationTests(unittest.TestCase):
+class LibronIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.fixture_fonts = ensure_readerly_fixtures()
+        cls.fixture_fonts = ensure_libron_fixtures()
         if not cls.fixture_fonts:
-            raise unittest.SkipTest("Readerly fixtures are unavailable")
+            raise unittest.SkipTest("Libron fixtures are unavailable")
 
     def _copy_fixture_fonts(self, workdir: Path) -> list[Path]:
         for font_path in self.fixture_fonts:
@@ -89,8 +89,8 @@ class ReaderlyIntegrationTests(unittest.TestCase):
             nv_fonts = sorted(workdir.glob("NV_*.ttf"))
             self.assertEqual(len(nv_fonts), len(font_inputs))
 
-            source_regular = workdir / "Readerly-Regular.ttf"
-            nv_regular = workdir / "NV_Readerly-Regular.ttf"
+            source_regular = workdir / "Libron-Regular.ttf"
+            nv_regular = workdir / "NV_Libron-Regular.ttf"
             source_font = TTFont(source_regular)
             nv_font = TTFont(nv_regular)
             self.assertEqual(
@@ -122,7 +122,7 @@ class ReaderlyIntegrationTests(unittest.TestCase):
     def test_legacy_kern_only_removes_gpos_but_keeps_kern(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workdir = Path(tmpdir)
-            source_path = next(path for path in self.fixture_fonts if path.name == "Readerly-Regular.ttf")
+            source_path = next(path for path in self.fixture_fonts if path.name == "Libron-Regular.ttf")
             input_path = workdir / source_path.name
             shutil.copy2(source_path, input_path)
 
@@ -138,7 +138,7 @@ class ReaderlyIntegrationTests(unittest.TestCase):
                 str(input_path),
             )
 
-            output_path = workdir / "KF_Readerly-Regular.ttf"
+            output_path = workdir / "KF_Libron-Regular.ttf"
             font = TTFont(output_path)
 
             self.assertNotIn("GPOS", font)
@@ -153,7 +153,7 @@ class ReaderlyIntegrationTests(unittest.TestCase):
     def test_kf_outline_processing_replaces_meaningful_hints_with_noop(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workdir = Path(tmpdir)
-            source_path = next(path for path in self.fixture_fonts if path.name == "Readerly-Regular.ttf")
+            source_path = next(path for path in self.fixture_fonts if path.name == "Libron-Regular.ttf")
             input_path = workdir / source_path.name
             shutil.copy2(source_path, input_path)
 
@@ -169,7 +169,7 @@ class ReaderlyIntegrationTests(unittest.TestCase):
                 str(input_path),
             )
 
-            output_path = workdir / "KF_Readerly-Regular.ttf"
+            output_path = workdir / "KF_Libron-Regular.ttf"
             font = TTFont(output_path)
 
             self.assertNotIn("fpgm", font)
@@ -180,7 +180,7 @@ class ReaderlyIntegrationTests(unittest.TestCase):
     def test_custom_name_updates_family_and_weight_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workdir = Path(tmpdir)
-            source_path = next(path for path in self.fixture_fonts if path.name == "Readerly-Bold.ttf")
+            source_path = next(path for path in self.fixture_fonts if path.name == "Libron-Bold.ttf")
             input_path = workdir / source_path.name
             shutil.copy2(source_path, input_path)
 
