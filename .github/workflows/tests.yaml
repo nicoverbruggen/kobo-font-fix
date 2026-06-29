@@ -20,8 +20,8 @@ jobs:
       - name: Prepare test fonts
         run: |
           mkdir -p fonts
-          cp tests/fixtures/Readerly.zip .
-          unzip -o Readerly.zip -d fonts
+          cp tests/fixtures/Libron.zip .
+          unzip -o Libron.zip -d fonts
 
       - name: Dry run NV preset
         run: python3 kobofix.py --preset nv --dry-run fonts/*.ttf
@@ -41,7 +41,11 @@ jobs:
           from fontTools.ttLib import TTFont
           import glob, sys
           errors = 0
-          for path in sorted(glob.glob('fonts/KF_*.ttf')):
+          paths = sorted(glob.glob('fonts/KF_*.ttf'))
+          if not paths:
+              print('FAIL: no KF fonts were generated')
+              sys.exit(1)
+          for path in paths:
               font = TTFont(path)
               has_kern = 'kern' in font
               pairs = 0

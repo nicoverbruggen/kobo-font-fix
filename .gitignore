@@ -1,5 +1,6 @@
 *.ttf
 *.otf
+*.zip
 __pycache__/
 tests/__pycache__/
 .tools/
