@@ -15,6 +15,13 @@ Processes TrueType fonts to improve compatibility with Kobo e-readers:
   into a legacy kern table, prioritized by Unicode range to fit within
   format 0 size constraints
 - Flattening TrueType composite glyphs to avoid Kobo renderer artifacts
+- Adding glyphs for common Unicode space characters the font is missing (thin
+  space, narrow no-break space, en/em spaces, zero-width spaces, etc.) so Kobo
+  does not render a .notdef box where one is used (always applied)
+- Adding hyphen/dash characters the font is missing (soft hyphen, non-breaking
+  hyphen, horizontal bar) by cloning an existing glyph's shape and width, and a
+  figure dash by re-spacing the en dash to the digit width, so they render
+  correctly instead of as a .notdef box (always applied)
 - Hinting: automatically re-running ttfautohint after outline rewriting for
   non-KF outputs when the source font had meaningful glyph-level TrueType hints
 - Wobble fix (KF preset): stripping hinting and giving every outline glyph the
@@ -37,6 +44,7 @@ Requirements:
 import sys
 import os
 import re
+import copy
 import shutil
 import subprocess
 import argparse
@@ -51,6 +59,7 @@ from typing import Dict, Tuple, Optional, List
 from fontTools.ttLib import TTFont, newTable
 from fontTools.ttLib.tables import ttProgram
 from fontTools.ttLib.tables._k_e_r_n import KernTable_format_0
+from fontTools.ttLib.tables._g_l_y_f import Glyph
 
 # -------------
 # PRESETS
@@ -115,6 +124,84 @@ TYPOGRAPHIC_PRIORITY_CODEPOINTS = {
     0x2026,  # HORIZONTAL ELLIPSIS
     0x2039,  # SINGLE LEFT-POINTING ANGLE QUOTATION MARK
     0x203A,  # SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
+}
+
+
+# Common Unicode space characters that are frequently absent from fonts. When
+# one is missing, a Kobo renders a .notdef box in its place, so we add an
+# (invisible) glyph for it. Each entry is (codepoint, glyph name, width spec);
+# the width spec is resolved by _resolve_space_width():
+#   ("em", frac)  -> round(unitsPerEm * frac): the canonical Unicode advance
+#   ("space", f)  -> f * the font's own U+0020 width (so the thin/narrow spaces
+#                    harmonise with the typeface); falls back to 1/5 em
+#   ("digit", _)  -> width of a digit glyph (figure space aligns with numerals)
+#   ("period", _) -> width of the period (punctuation space)
+#   ("zero", _)   -> 0, for zero-width format characters
+SPACE_GLYPHS = [
+    (0x2000, "uni2000", ("em", 1 / 2)),   # EN QUAD
+    (0x2001, "uni2001", ("em", 1)),       # EM QUAD
+    (0x2002, "uni2002", ("em", 1 / 2)),   # EN SPACE
+    (0x2003, "uni2003", ("em", 1)),       # EM SPACE
+    (0x2004, "uni2004", ("em", 1 / 3)),   # THREE-PER-EM SPACE
+    (0x2005, "uni2005", ("em", 1 / 4)),   # FOUR-PER-EM SPACE
+    (0x2006, "uni2006", ("em", 1 / 6)),   # SIX-PER-EM SPACE
+    (0x2007, "uni2007", ("digit", None)), # FIGURE SPACE
+    (0x2008, "uni2008", ("period", None)),# PUNCTUATION SPACE
+    (0x2009, "uni2009", ("space", 1 / 2)),# THIN SPACE
+    (0x200A, "uni200A", ("em", 1 / 10)),  # HAIR SPACE
+    (0x202F, "uni202F", ("space", 1 / 2)),# NARROW NO-BREAK SPACE
+    (0x205F, "uni205F", ("em", 4 / 18)),  # MEDIUM MATHEMATICAL SPACE
+    (0x3000, "uni3000", ("em", 1)),       # IDEOGRAPHIC SPACE (full-width)
+    (0x200B, "uni200B", ("zero", None)),  # ZERO WIDTH SPACE
+    (0x200C, "uni200C", ("zero", None)),  # ZERO WIDTH NON-JOINER
+    (0x200D, "uni200D", ("zero", None)),  # ZERO WIDTH JOINER
+    (0x200E, "uni200E", ("zero", None)),  # LEFT-TO-RIGHT MARK
+    (0x200F, "uni200F", ("zero", None)),  # RIGHT-TO-LEFT MARK
+    (0x2060, "uni2060", ("zero", None)),  # WORD JOINER
+    (0xFEFF, "uniFEFF", ("zero", None)),  # ZERO WIDTH NO-BREAK SPACE (BOM)
+]
+# Characters that must render a *visible* shape identical to a glyph the font
+# already has, so they can't be blanked like a space. Instead we clone the
+# existing glyph's contours and advance width. The classic case is the soft
+# hyphen: when it surfaces at a line break it should look exactly like the
+# regular hyphen (the "only visible when wrapped" behaviour is the layout
+# engine's job, not the font's). Each entry is (codepoint, glyph name, source
+# codepoints in preference order).
+CLONE_GLYPHS = [
+    (0x00AD, "uni00AD", (0x002D,)),         # SOFT HYPHEN         <- hyphen
+    (0x2010, "uni2010", (0x002D,)),         # HYPHEN              <- hyphen
+    (0x2011, "uni2011", (0x002D, 0x2010)),  # NON-BREAKING HYPHEN <- hyphen
+    (0x2015, "uni2015", (0x2014,)),         # HORIZONTAL BAR      <- em dash
+]
+
+CLONE_GLYPH_NAMES = {
+    0x00AD: "soft hyphen", 0x2010: "hyphen",
+    0x2011: "non-breaking hyphen", 0x2015: "horizontal bar",
+}
+
+# FIGURE DASH (U+2012) is a dash whose defining property is a digit-width
+# advance, so it is not a plain clone: we take the en dash's bar shape and
+# re-space it to the figure width, centred (see add_missing_figure_dash).
+FIGURE_DASH_CODEPOINT = 0x2012
+FIGURE_DASH_GLYPH_NAME = "uni2012"
+FIGURE_DASH_SOURCE_CODEPOINTS = (0x2013, 0x002D)  # en dash preferred, else hyphen
+
+# Still deliberately NOT synthesised: MINUS SIGN (U+2212) is a distinct, wider
+# glyph aligned with the plus sign; and LINE/PARAGRAPH SEPARATOR (U+2028/U+2029)
+# are line breaks, not printable glyphs.
+
+# Human-readable names for logging / dry-run output.
+SPACE_GLYPH_NAMES = {
+    0x2000: "en quad", 0x2001: "em quad", 0x2002: "en space",
+    0x2003: "em space", 0x2004: "three-per-em space",
+    0x2005: "four-per-em space", 0x2006: "six-per-em space",
+    0x2007: "figure space", 0x2008: "punctuation space", 0x2009: "thin space",
+    0x200A: "hair space", 0x202F: "narrow no-break space",
+    0x205F: "medium mathematical space", 0x3000: "ideographic space",
+    0x200B: "zero width space", 0x200C: "zero width non-joiner",
+    0x200D: "zero width joiner", 0x200E: "left-to-right mark",
+    0x200F: "right-to-left mark", 0x2060: "word joiner",
+    0xFEFF: "zero width no-break space",
 }
 
 
@@ -1297,6 +1384,29 @@ class FontProcessor:
             if has_hint_tables or self._font_needs_noop_hints(font):
                 changes.append("Strip hinting and set no-op glyph instructions (fix iType wobble)")
 
+        # Spaces: always ensure common Unicode space characters exist so Kobo
+        # does not render a .notdef box in their place. Independent of preset.
+        if "cmap" in font:
+            best_cmap = font.getBestCmap() or {}
+            missing = [cp for cp, _name, _spec in SPACE_GLYPHS if cp not in best_cmap]
+            if missing:
+                joined = ", ".join(f"U+{cp:04X}" for cp in missing)
+                changes.append(f"Add {len(missing)} missing space glyph(s): {joined}")
+
+            # Hyphen/dash characters cloned from an existing glyph's shape.
+            clone_missing = [
+                cp for cp, _name, sources in CLONE_GLYPHS
+                if cp not in best_cmap and any(best_cmap.get(s) for s in sources)
+            ]
+            if clone_missing:
+                joined = ", ".join(f"U+{cp:04X}" for cp in clone_missing)
+                changes.append(f"Add {len(clone_missing)} missing hyphen/dash glyph(s) cloned from existing shapes: {joined}")
+
+            # Figure dash (U+2012): en dash bar re-spaced to the digit width.
+            if (FIGURE_DASH_CODEPOINT not in best_cmap
+                    and any(best_cmap.get(s) for s in FIGURE_DASH_SOURCE_CODEPOINTS)):
+                changes.append("Add missing figure dash (U+2012) at digit width")
+
         # Check line adjustment
         if self.line_percent != 0:
             if "OS/2" in font and "head" in font:
@@ -1440,6 +1550,214 @@ class FontProcessor:
 
         return len(composite_names)
 
+    @staticmethod
+    def _digit_width(font: TTFont, cmap: dict) -> Optional[int]:
+        """Advance width of the font's '0' — the conventional figure width.
+
+        Tabular figures are all the width of the zero, and '0' is essentially
+        never the proportional outlier, so it is the standard reference for
+        figure-width characters (figure space, figure dash). Falls back to the
+        first other available digit; None only when the font has no digits.
+        """
+        hmtx = font["hmtx"].metrics if "hmtx" in font else {}
+        for cp in range(0x0030, 0x003A):  # '0' first, then 1-9 as a fallback
+            name = cmap.get(cp)
+            if name and name in hmtx:
+                return hmtx[name][0]
+        return None
+
+    @classmethod
+    def _resolve_space_width(cls, font: TTFont, cmap: dict, upm: int, spec) -> int:
+        """Resolve a SPACE_GLYPHS width spec to an advance width in font units."""
+        mode, value = spec
+        hmtx = font["hmtx"].metrics if "hmtx" in font else {}
+
+        def glyph_width(codepoint: int) -> Optional[int]:
+            name = cmap.get(codepoint)
+            if name and name in hmtx:
+                return hmtx[name][0]
+            return None
+
+        if mode == "em":
+            return round(upm * value)
+        if mode == "zero":
+            return 0
+        if mode == "space":
+            base = glyph_width(0x0020)
+            return round(base * value) if base is not None else round(upm / 5)
+        if mode == "digit":
+            w = cls._digit_width(font, cmap)
+            return w if w is not None else round(upm / 2)
+        if mode == "period":
+            w = glyph_width(0x002E)
+            return w if w is not None else round(upm / 4)
+        return round(upm / 5)
+
+    @classmethod
+    def add_missing_spaces(cls, font: TTFont) -> List[Tuple[int, int]]:
+        """Add glyphs for common Unicode space characters the font is missing.
+
+        Many fonts omit fixed-width and format spaces (thin space, narrow
+        no-break space, en/em spaces, etc.), so Kobo renders a .notdef box
+        wherever one is used. For each codepoint in SPACE_GLYPHS not already in
+        the cmap, an empty glyph is added and mapped in every Unicode cmap
+        subtable, with an advance width resolved from the typeface (see
+        SPACE_GLYPHS / _resolve_space_width). Glyph order, hmtx and maxp are
+        updated. Returns a list of (codepoint, advance width) added; empty when
+        nothing was missing or the font lacks glyf/cmap.
+        """
+        if "glyf" not in font or "cmap" not in font:
+            return []
+        cmap = font.getBestCmap() or {}
+        upm = font["head"].unitsPerEm if "head" in font else 1000
+
+        added: List[Tuple[int, int]] = []
+        for codepoint, name, spec in SPACE_GLYPHS:
+            if codepoint in cmap:
+                continue  # already present
+            width = cls._resolve_space_width(font, cmap, upm, spec)
+
+            if name not in font.getGlyphOrder():
+                glyph = Glyph()
+                glyph.numberOfContours = 0
+                font["glyf"][name] = glyph  # also appends to glyf.glyphOrder
+                order = font.getGlyphOrder()
+                if name not in order:
+                    font.setGlyphOrder(order + [name])
+                font["hmtx"][name] = (width, 0)
+
+            for table in font["cmap"].tables:
+                if table.isUnicode():
+                    table.cmap[codepoint] = name
+
+            added.append((codepoint, width))
+
+        if added and "maxp" in font:
+            font["maxp"].numGlyphs = len(font.getGlyphOrder())
+
+        return added
+
+    @classmethod
+    def add_missing_clones(cls, font: TTFont) -> List[Tuple[int, str]]:
+        """Add glyphs that should share an existing glyph's shape (see CLONE_GLYPHS).
+
+        For each codepoint not already in the cmap, the first available source
+        glyph (by preference order) is deep-copied — contours and advance width
+        — under a new name and mapped in every Unicode cmap subtable. This gives
+        characters like the soft hyphen or non-breaking hyphen the correct
+        visible shape instead of a .notdef box. A codepoint is skipped when the
+        font has none of its source glyphs. Returns a list of (codepoint,
+        source glyph name) added.
+        """
+        if "glyf" not in font or "cmap" not in font:
+            return []
+        cmap = font.getBestCmap() or {}
+        glyf = font["glyf"]
+
+        added: List[Tuple[int, str]] = []
+        for codepoint, name, sources in CLONE_GLYPHS:
+            if codepoint in cmap:
+                continue  # already present
+            source_name = None
+            for src_cp in sources:
+                candidate = cmap.get(src_cp)
+                if candidate and candidate in glyf:
+                    source_name = candidate
+                    break
+            if source_name is None:
+                continue  # no source glyph to clone from
+
+            if name not in font.getGlyphOrder():
+                glyf[name] = copy.deepcopy(glyf[source_name])
+                order = font.getGlyphOrder()
+                if name not in order:
+                    font.setGlyphOrder(order + [name])
+                font["hmtx"][name] = font["hmtx"][source_name]
+
+            for table in font["cmap"].tables:
+                if table.isUnicode():
+                    table.cmap[codepoint] = name
+
+            added.append((codepoint, source_name))
+
+        if added and "maxp" in font:
+            font["maxp"].numGlyphs = len(font.getGlyphOrder())
+
+        return added
+
+    @classmethod
+    def add_missing_figure_dash(cls, font: TTFont) -> Optional[int]:
+        """Add FIGURE DASH (U+2012) when missing.
+
+        A figure dash is a dash whose advance equals the figure (digit) width,
+        used to align with numerals. It is not a plain clone: we take the en
+        dash's bar (its stroke, height and thickness are already correct),
+        re-space it to the width of the '0', and centre the ink in that advance.
+        Falls back to the hyphen if there is no en dash, and to half the em if
+        the font has no digits. Returns the advance width used, or None when the
+        font already has U+2012 or has no dash to base it on.
+        """
+        if "glyf" not in font or "cmap" not in font:
+            return None
+        cmap = font.getBestCmap() or {}
+        if FIGURE_DASH_CODEPOINT in cmap:
+            return None
+
+        source_name = None
+        for src_cp in FIGURE_DASH_SOURCE_CODEPOINTS:
+            candidate = cmap.get(src_cp)
+            if candidate and candidate in font["glyf"]:
+                source_name = candidate
+                break
+        if source_name is None:
+            return None
+
+        upm = font["head"].unitsPerEm if "head" in font else 1000
+        width = cls._digit_width(font, cmap)
+        if width is None:
+            width = round(upm / 2)
+
+        glyf = font["glyf"]
+        name = FIGURE_DASH_GLYPH_NAME
+        if name not in font.getGlyphOrder():
+            # Decompose the source into a simple outline so we can translate it,
+            # then centre its ink horizontally within the digit-width advance.
+            from fontTools.pens.basePen import DecomposingPen
+            from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+            class DecomposingTTGlyphPen(DecomposingPen, TTGlyphPen):
+                pass
+
+            pen = DecomposingTTGlyphPen(font.getGlyphSet())
+            font.getGlyphSet()[source_name].draw(pen)
+            glyph = pen.glyph()
+            glyph.recalcBounds(glyf)
+
+            lsb = 0
+            if getattr(glyph, "numberOfContours", 0) > 0 and hasattr(glyph, "coordinates"):
+                ink = glyph.xMax - glyph.xMin
+                lsb = round((width - ink) / 2)
+                dx = lsb - glyph.xMin
+                if dx:
+                    glyph.coordinates.translate((dx, 0))
+                    glyph.recalcBounds(glyf)
+                    lsb = glyph.xMin
+
+            glyf[name] = glyph
+            order = font.getGlyphOrder()
+            if name not in order:
+                font.setGlyphOrder(order + [name])
+            font["hmtx"][name] = (width, lsb)
+
+        for table in font["cmap"].tables:
+            if table.isUnicode():
+                table.cmap[FIGURE_DASH_CODEPOINT] = name
+
+        if "maxp" in font:
+            font["maxp"].numGlyphs = len(font.getGlyphOrder())
+
+        return width
+
     def process_font(self,
         kern_mode: str,
         font_path: str,
@@ -1541,6 +1859,27 @@ class FontProcessor:
                 flattened = self.flatten_composites(font)
                 if flattened:
                     logger.info(f"  Flattened {flattened} composite glyph(s)")
+
+            # Add common Unicode space characters the font is missing, so Kobo
+            # does not render a .notdef box where one is used. Always on,
+            # independent of preset. Runs before hinting; the empty glyphs have
+            # no outline, so the no-op instrumentation below skips them.
+            added_spaces = self.add_missing_spaces(font)
+            for codepoint, width in added_spaces:
+                label = SPACE_GLYPH_NAMES.get(codepoint, "space")
+                logger.info(f"  Added {label} (U+{codepoint:04X}), advance width {width}")
+
+            # Add hyphen/dash characters the font is missing by cloning an
+            # existing glyph's shape (e.g. the soft hyphen from the hyphen).
+            # Runs before hinting so KF no-op instrumentation covers the clones.
+            added_clones = self.add_missing_clones(font)
+            for codepoint, source_name in added_clones:
+                label = CLONE_GLYPH_NAMES.get(codepoint, "glyph")
+                logger.info(f"  Added {label} (U+{codepoint:04X}) cloned from '{source_name}'")
+
+            figure_dash_width = self.add_missing_figure_dash(font)
+            if figure_dash_width is not None:
+                logger.info(f"  Added figure dash (U+2012), advance width {figure_dash_width} (digit width)")
 
             # KF output strips hinting completely, then adds one uniform no-op
             # program to every outline glyph so iType avoids its auto-grid-fit.

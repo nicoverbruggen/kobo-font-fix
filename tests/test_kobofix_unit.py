@@ -314,6 +314,268 @@ class KobofixUnitTests(unittest.TestCase):
             (0, 0, 100, 100),
         )
 
+    @staticmethod
+    def _build_font_with_space(space_width: int = 500, upm: int = 1000):
+        glyphs = {
+            ".notdef": TTGlyphPen(None).glyph(),
+            "space": TTGlyphPen(None).glyph(),
+            "period": TTGlyphPen(None).glyph(),
+            "zero": TTGlyphPen(None).glyph(),
+        }
+        builder = FontBuilder(upm, isTTF=True)
+        builder.setupGlyphOrder(list(glyphs))
+        builder.setupGlyf(glyphs)
+        builder.setupHorizontalMetrics({
+            ".notdef": (500, 0),
+            "space": (space_width, 0),
+            "period": (200, 0),
+            "zero": (600, 0),
+        })
+        builder.setupHorizontalHeader(ascent=800, descent=-200)
+        builder.setupCharacterMap({0x0020: "space", 0x002E: "period", 0x0030: "zero"})
+        builder.setupMaxp()
+        builder.setupNameTable({})
+        builder.setupOS2()
+        builder.setupPost()
+        return builder.font
+
+    def test_add_missing_spaces_adds_all_when_absent(self) -> None:
+        from kobofix import SPACE_GLYPHS
+
+        font = self._build_font_with_space(space_width=500)
+
+        added = FontProcessor.add_missing_spaces(font)
+
+        self.assertEqual(len(added), len(SPACE_GLYPHS))
+        cmap = font.getBestCmap()
+        for codepoint, _name, _spec in SPACE_GLYPHS:
+            self.assertIn(codepoint, cmap)
+            glyph_name = cmap[codepoint]
+            self.assertEqual(font["glyf"][glyph_name].numberOfContours, 0)
+        self.assertEqual(font["maxp"].numGlyphs, len(font.getGlyphOrder()))
+
+    def test_add_missing_spaces_resolves_widths_per_spec(self) -> None:
+        font = self._build_font_with_space(space_width=500, upm=1000)
+
+        widths = dict(FontProcessor.add_missing_spaces(font))
+
+        self.assertEqual(widths[0x2009], 250)  # thin: half of space (500)
+        self.assertEqual(widths[0x202F], 250)  # narrow no-break: same as thin
+        self.assertEqual(widths[0x2003], 1000) # em space: 1 em
+        self.assertEqual(widths[0x2002], 500)  # en space: 1/2 em
+        self.assertEqual(widths[0x2006], round(1000 / 6))  # six-per-em
+        self.assertEqual(widths[0x2007], 600)  # figure space: digit width
+        self.assertEqual(widths[0x2008], 200)  # punctuation space: period width
+        self.assertEqual(widths[0x200B], 0)    # zero width space
+
+    def test_add_missing_spaces_is_noop_when_already_present(self) -> None:
+        font = self._build_font_with_space()
+        FontProcessor.add_missing_spaces(font)
+        glyph_count = len(font.getGlyphOrder())
+
+        # Second call must not add duplicates or change anything.
+        result = FontProcessor.add_missing_spaces(font)
+
+        self.assertEqual(result, [])
+        self.assertEqual(len(font.getGlyphOrder()), glyph_count)
+
+    def test_add_missing_spaces_space_width_falls_back_without_space(self) -> None:
+        font = self._build_font_with_space(upm=2000)
+        # Drop the space mapping so "space"-derived widths fall back to 1/5 em.
+        for table in font["cmap"].tables:
+            table.cmap.pop(0x0020, None)
+
+        widths = dict(FontProcessor.add_missing_spaces(font))
+
+        self.assertEqual(widths[0x2009], 400)  # 2000 / 5
+
+    @staticmethod
+    def _build_font_with_hyphen_and_emdash(upm: int = 1000):
+        def rect(x0, y0, x1, y1):
+            pen = TTGlyphPen(None)
+            pen.moveTo((x0, y0))
+            pen.lineTo((x1, y0))
+            pen.lineTo((x1, y1))
+            pen.lineTo((x0, y1))
+            pen.closePath()
+            return pen.glyph()
+
+        glyphs = {
+            ".notdef": TTGlyphPen(None).glyph(),
+            "hyphen": rect(50, 200, 300, 280),
+            "emdash": rect(0, 200, 900, 280),
+        }
+        builder = FontBuilder(upm, isTTF=True)
+        builder.setupGlyphOrder(list(glyphs))
+        builder.setupGlyf(glyphs)
+        builder.setupHorizontalMetrics({
+            ".notdef": (500, 0),
+            "hyphen": (350, 50),
+            "emdash": (1000, 0),
+        })
+        builder.setupHorizontalHeader(ascent=800, descent=-200)
+        builder.setupCharacterMap({0x002D: "hyphen", 0x2014: "emdash"})
+        builder.setupMaxp()
+        builder.setupNameTable({})
+        builder.setupOS2()
+        builder.setupPost()
+        return builder.font
+
+    def test_add_missing_clones_duplicates_hyphen_shape_and_width(self) -> None:
+        font = self._build_font_with_hyphen_and_emdash()
+
+        added = dict(FontProcessor.add_missing_clones(font))
+
+        # Soft hyphen, hyphen and non-breaking hyphen all come from the hyphen;
+        # the horizontal bar comes from the em dash.
+        self.assertEqual(added[0x00AD], "hyphen")
+        self.assertEqual(added[0x2011], "hyphen")
+        self.assertEqual(added[0x2015], "emdash")
+
+        cmap = font.getBestCmap()
+        nbhyphen = cmap[0x2011]
+        # Same advance width and left side bearing as the source hyphen.
+        self.assertEqual(font["hmtx"][nbhyphen], font["hmtx"]["hyphen"])
+        # A real (non-empty) outline, matching the hyphen's contour count.
+        self.assertEqual(
+            font["glyf"][nbhyphen].numberOfContours,
+            font["glyf"]["hyphen"].numberOfContours,
+        )
+        self.assertGreater(font["glyf"][nbhyphen].numberOfContours, 0)
+        # Independent copy: mutating the clone must not touch the source.
+        self.assertIsNot(font["glyf"][nbhyphen], font["glyf"]["hyphen"])
+        self.assertEqual(font["maxp"].numGlyphs, len(font.getGlyphOrder()))
+
+    def test_add_missing_clones_is_noop_when_present(self) -> None:
+        font = self._build_font_with_hyphen_and_emdash()
+        FontProcessor.add_missing_clones(font)
+        count = len(font.getGlyphOrder())
+
+        result = FontProcessor.add_missing_clones(font)
+
+        self.assertEqual(result, [])
+        self.assertEqual(len(font.getGlyphOrder()), count)
+
+    def test_add_missing_figure_dash_uses_digit_width_and_centers(self) -> None:
+        font = self._build_font_with_hyphen_and_emdash()
+        # Give the font a '0' so the figure width can be measured (width 700,
+        # deliberately different from the em dash's advance of 1000).
+        zero = TTGlyphPen(None)
+        zero.moveTo((100, 0)); zero.lineTo((600, 0))
+        zero.lineTo((600, 700)); zero.lineTo((100, 700)); zero.closePath()
+        order = font.getGlyphOrder() + ["zero"]
+        font["glyf"]["zero"] = zero.glyph()
+        font.setGlyphOrder(order)
+        font["hmtx"]["zero"] = (700, 100)
+        for table in font["cmap"].tables:
+            if table.isUnicode():
+                table.cmap[0x0030] = "zero"
+
+        width = FontProcessor.add_missing_figure_dash(font)
+
+        self.assertEqual(width, 700)  # the '0' advance width
+        cmap = font.getBestCmap()
+        name = cmap[0x2012]
+        self.assertEqual(font["hmtx"][name][0], 700)
+        glyph = font["glyf"][name]
+        self.assertGreater(glyph.numberOfContours, 0)  # real dash outline
+        # Ink is centred: left and right side bearings are equal (±1 rounding).
+        lsb = glyph.xMin
+        rsb = 700 - glyph.xMax
+        self.assertLessEqual(abs(lsb - rsb), 1)
+
+    def test_add_missing_figure_dash_is_noop_when_present(self) -> None:
+        font = self._build_font_with_hyphen_and_emdash()
+        for table in font["cmap"].tables:
+            if table.isUnicode():
+                table.cmap[0x2012] = "emdash"
+
+        self.assertIsNone(FontProcessor.add_missing_figure_dash(font))
+
+    def test_add_missing_figure_dash_falls_back_to_hyphen(self) -> None:
+        font = self._build_font_with_hyphen_and_emdash()
+        # Remove the en dash and add a '0' so the hyphen becomes the only dash.
+        for table in font["cmap"].tables:
+            table.cmap.pop(0x2014, None)
+            if table.isUnicode():
+                table.cmap[0x0030] = "hyphen"  # any digit width source
+
+        width = FontProcessor.add_missing_figure_dash(font)
+
+        self.assertIsNotNone(width)
+        cmap = font.getBestCmap()
+        self.assertIn(0x2012, cmap)
+        self.assertGreater(font["glyf"][cmap[0x2012]].numberOfContours, 0)
+
+    def test_add_missing_figure_dash_returns_none_without_any_dash(self) -> None:
+        font = self._build_font_with_hyphen_and_emdash()
+        for table in font["cmap"].tables:
+            table.cmap.pop(0x002D, None)
+            table.cmap.pop(0x2014, None)
+
+        self.assertIsNone(FontProcessor.add_missing_figure_dash(font))
+
+    def test_digit_width_prefers_zero_then_falls_back(self) -> None:
+        font = self._build_font_with_space()  # has 'zero' mapped at U+0030 (600)
+        cmap = font.getBestCmap()
+        self.assertEqual(FontProcessor._digit_width(font, cmap), 600)
+
+        # With '0' absent, it falls back to the next available digit.
+        for table in font["cmap"].tables:
+            table.cmap.pop(0x0030, None)
+            if table.isUnicode():
+                table.cmap[0x0031] = "period"  # stand-in digit glyph (width 200)
+        cmap = font.getBestCmap()
+        self.assertEqual(FontProcessor._digit_width(font, cmap), 200)
+
+    def test_added_outline_glyphs_get_noop_but_spaces_stay_empty(self) -> None:
+        # The cloned hyphen and figure dash are real outlines added right before
+        # KF no-op instrumentation, so they must receive the no-op program;
+        # the empty space glyphs must stay contour-less and un-hinted.
+        font = self._build_font_with_hyphen_and_emdash()
+        # Add a space and a digit so widths resolve.
+        for name, metrics in (("space", (500, 0)), ("zero", (600, 100))):
+            font["glyf"][name] = TTGlyphPen(None).glyph()
+            font.setGlyphOrder(font.getGlyphOrder() + [name])
+            font["hmtx"][name] = metrics
+        # give 'zero' a real contour so it's a valid digit glyph
+        zero = TTGlyphPen(None)
+        zero.moveTo((100, 0)); zero.lineTo((500, 0))
+        zero.lineTo((500, 700)); zero.lineTo((100, 700)); zero.closePath()
+        font["glyf"]["zero"] = zero.glyph()
+        for table in font["cmap"].tables:
+            if table.isUnicode():
+                table.cmap[0x0020] = "space"
+                table.cmap[0x0030] = "zero"
+
+        FontProcessor.add_missing_spaces(font)
+        FontProcessor.add_missing_clones(font)
+        FontProcessor.add_missing_figure_dash(font)
+        FontProcessor._add_noop_hints(font)
+
+        cmap = font.getBestCmap()
+        noop = FontProcessor._NOOP_BYTECODE
+        # Outline glyphs we synthesised carry the no-op program.
+        for cp in (0x2011, 0x2012, 0x2015):  # nb-hyphen, figure dash, h-bar
+            glyph = font["glyf"][cmap[cp]]
+            self.assertEqual(glyph.program.getBytecode(), noop)
+        # Empty space glyphs stay contour-less and receive no program.
+        for cp in (0x2009, 0x2003, 0x200B):  # thin, em space, zero-width space
+            glyph = font["glyf"][cmap[cp]]
+            self.assertEqual(glyph.numberOfContours, 0)
+            self.assertFalse(hasattr(glyph, "program") and glyph.program)
+
+    def test_add_missing_clones_skips_when_no_source_glyph(self) -> None:
+        font = self._build_font_with_hyphen_and_emdash()
+        # Remove every source mapping so nothing can be cloned.
+        for table in font["cmap"].tables:
+            table.cmap.pop(0x002D, None)
+            table.cmap.pop(0x2014, None)
+
+        result = FontProcessor.add_missing_clones(font)
+
+        self.assertEqual(result, [])
+
     def test_process_otf_converts_to_ttf_and_removes_old_cff_names(self) -> None:
         glyph_order = [".notdef", "A"]
 
