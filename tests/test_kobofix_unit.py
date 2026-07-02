@@ -314,6 +314,48 @@ class KobofixUnitTests(unittest.TestCase):
             (0, 0, 100, 100),
         )
 
+    def test_scale_font_scales_outlines_advances_and_size_metadata(self) -> None:
+        pen = TTGlyphPen(None)
+        pen.moveTo((10, 0))
+        pen.lineTo((110, 0))
+        pen.lineTo((110, 200))
+        pen.lineTo((10, 200))
+        pen.closePath()
+
+        glyphs = {
+            ".notdef": TTGlyphPen(None).glyph(),
+            "A": pen.glyph(),
+        }
+
+        builder = FontBuilder(1000, isTTF=True)
+        builder.setupGlyphOrder(list(glyphs))
+        builder.setupGlyf(glyphs)
+        builder.setupHorizontalMetrics({
+            ".notdef": (500, 0),
+            "A": (500, 10),
+        })
+        builder.setupHorizontalHeader(ascent=800, descent=-200)
+        builder.setupCharacterMap({0x0041: "A"})
+        builder.setupMaxp()
+        builder.setupNameTable({})
+        builder.setupOS2()
+        builder.setupPost()
+        font = builder.font
+        font["OS/2"].sxHeight = 400
+        font["OS/2"].sCapHeight = 700
+        font["OS/2"].xAvgCharWidth = 500
+
+        FontProcessor.scale_font(font, 1.1)
+
+        self.assertEqual(font["head"].unitsPerEm, 1000)
+        self.assertEqual(font["hmtx"]["A"], (550, 11))
+        self.assertEqual(font["OS/2"].sxHeight, 440)
+        self.assertEqual(font["OS/2"].sCapHeight, 770)
+        self.assertEqual(font["OS/2"].xAvgCharWidth, 550)
+        self.assertEqual(font["glyf"]["A"].xMin, 11)
+        self.assertEqual(font["glyf"]["A"].xMax, 121)
+        self.assertEqual(font["glyf"]["A"].yMax, 220)
+
     @staticmethod
     def _build_font_with_space(space_width: int = 500, upm: int = 1000):
         glyphs = {

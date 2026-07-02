@@ -10,6 +10,7 @@ Processes TrueType fonts to improve compatibility with Kobo e-readers:
 - Validating and correcting PANOSE metadata based on font style
 - Updating font weight metadata (OS/2 usWeightClass)
 - Adjusting line spacing via font-line
+- Optional glyph and advance scaling for fonts that render optically small
 - Simplifying outlines w/ skia-pathops
 - Kerning: extracting GPOS pairs (Format 1, Format 2, and Extension lookups)
   into a legacy kern table, prioritized by Unicode range to fit within
@@ -676,6 +677,147 @@ class FontProcessor:
 
         return len(items)
 
+    @staticmethod
+    def _scale_value_record(record, scale: float) -> int:
+        """Scale numeric GPOS ValueRecord positioning fields in place."""
+        if record is None:
+            return 0
+
+        changed = 0
+        for field in ("XPlacement", "YPlacement", "XAdvance", "YAdvance"):
+            value = getattr(record, field, None)
+            if value:
+                setattr(record, field, int(round(value * scale)))
+                changed += 1
+        return changed
+
+    @classmethod
+    def _scale_gpos_pairpos(cls, font: TTFont, scale: float) -> int:
+        """Scale PairPos GPOS value records so kerning tracks scaled advances."""
+        if "GPOS" not in font:
+            return 0
+
+        changed = 0
+        lookup_list = getattr(font["GPOS"].table, "LookupList", None)
+        if lookup_list is None:
+            return 0
+
+        for lookup in getattr(lookup_list, "Lookup", []):
+            lookup_type = getattr(lookup, "LookupType", None)
+            subtables = getattr(lookup, "SubTable", [])
+
+            if lookup_type == 9:
+                unwrapped = []
+                for ext_subtable in subtables:
+                    ext_type = getattr(ext_subtable, "ExtensionLookupType", None)
+                    inner = getattr(ext_subtable, "ExtSubTable", None)
+                    if ext_type == 2 and inner is not None:
+                        unwrapped.append(inner)
+                subtables = unwrapped
+                lookup_type = 2 if unwrapped else None
+
+            if lookup_type != 2:
+                continue
+
+            for subtable in subtables:
+                fmt = getattr(subtable, "Format", None)
+                if fmt == 1:
+                    for pair_set in getattr(subtable, "PairSet", []):
+                        for record in getattr(pair_set, "PairValueRecord", []):
+                            changed += cls._scale_value_record(getattr(record, "Value1", None), scale)
+                            changed += cls._scale_value_record(getattr(record, "Value2", None), scale)
+                elif fmt == 2:
+                    for class1 in getattr(subtable, "Class1Record", []):
+                        for class2 in getattr(class1, "Class2Record", []):
+                            changed += cls._scale_value_record(getattr(class2, "Value1", None), scale)
+                            changed += cls._scale_value_record(getattr(class2, "Value2", None), scale)
+        return changed
+
+    @staticmethod
+    def _scale_optional_metric(obj, attr: str, scale: float) -> None:
+        if hasattr(obj, attr):
+            value = getattr(obj, attr)
+            if value is not None:
+                setattr(obj, attr, int(round(value * scale)))
+
+    @classmethod
+    def scale_font(cls, font: TTFont, scale: float) -> None:
+        """Scale glyph outlines, advances, and kerning inside the current UPM.
+
+        This changes optical glyph size without changing unitsPerEm or line
+        metrics, keeping Kobo line spacing stable while making a small-looking
+        face read larger.
+        """
+        if scale <= 0:
+            raise ValueError("scale must be greater than zero")
+
+        if "glyf" in font:
+            glyf = font["glyf"]
+            for name in font.getGlyphOrder():
+                glyph = glyf[name]
+                if glyph.isComposite():
+                    for component in getattr(glyph, "components", []):
+                        if hasattr(component, "x"):
+                            component.x = int(round(component.x * scale))
+                        if hasattr(component, "y"):
+                            component.y = int(round(component.y * scale))
+                elif getattr(glyph, "numberOfContours", 0) > 0 and hasattr(glyph, "coordinates"):
+                    glyph.coordinates.scale((scale, scale))
+                    glyph.coordinates.toInt()
+                glyph.recalcBounds(glyf)
+
+        if "hmtx" in font:
+            for name, (advance, lsb) in list(font["hmtx"].metrics.items()):
+                font["hmtx"].metrics[name] = (
+                    int(round(advance * scale)),
+                    int(round(lsb * scale)),
+                )
+
+        if "vmtx" in font:
+            for name, (advance, tsb) in list(font["vmtx"].metrics.items()):
+                font["vmtx"].metrics[name] = (
+                    int(round(advance * scale)),
+                    int(round(tsb * scale)),
+                )
+
+        if "kern" in font:
+            for subtable in getattr(font["kern"], "kernTables", []):
+                if hasattr(subtable, "kernTable"):
+                    subtable.kernTable = {
+                        pair: int(round(value * scale))
+                        for pair, value in subtable.kernTable.items()
+                    }
+
+        cls._scale_gpos_pairpos(font, scale)
+
+        if "OS/2" in font:
+            os2 = font["OS/2"]
+            for attr in (
+                "xAvgCharWidth",
+                "sxHeight",
+                "sCapHeight",
+                "ySubscriptXSize",
+                "ySubscriptYSize",
+                "ySubscriptXOffset",
+                "ySubscriptYOffset",
+                "ySuperscriptXSize",
+                "ySuperscriptYSize",
+                "ySuperscriptXOffset",
+                "ySuperscriptYOffset",
+                "yStrikeoutSize",
+                "yStrikeoutPosition",
+            ):
+                cls._scale_optional_metric(os2, attr, scale)
+
+        if "post" in font:
+            cls._scale_optional_metric(font["post"], "underlinePosition", scale)
+            cls._scale_optional_metric(font["post"], "underlineThickness", scale)
+
+        if "hhea" in font and "hmtx" in font:
+            advances = [advance for advance, _lsb in font["hmtx"].metrics.values()]
+            if advances:
+                font["hhea"].advanceWidthMax = max(advances)
+
     # ============================================================
     # OT-layout normalization
     # ============================================================
@@ -1228,6 +1370,7 @@ class FontProcessor:
         is_otf: bool = False,
         stamp: bool = False,
         outline_mode: str = "apply",
+        scale: float = 1.0,
     ) -> List[str]:
         """
         Analyze what changes would be made to the font.
@@ -1316,6 +1459,9 @@ class FontProcessor:
             new_ms = (current_ms & ~style_ms_mask) | expected_ms
             if current_ms != new_ms:
                 changes.append(f"Update macStyle: 0x{current_ms:04x} -> 0x{new_ms:04x} (style bits)")
+
+        if scale != 1.0:
+            changes.append(f"Scale glyphs and advances to {scale:.3g}x")
 
         # Check kerning
         # Note: As of firmware 4.45, Kobo reads GPOS kerning data correctly,
@@ -1768,6 +1914,7 @@ class FontProcessor:
         dry_run: bool = False,
         outline_mode: str = "apply",
         stamp: bool = False,
+        scale: float = 1.0,
     ) -> bool:
         """
         Process a single font file, or report what would change in dry-run mode.
@@ -1814,6 +1961,7 @@ class FontProcessor:
             is_otf,
             stamp,
             outline_mode,
+            scale,
         )
 
         if not changes:
@@ -1841,6 +1989,10 @@ class FontProcessor:
             self.check_and_fix_panose(font, font_path)
             self.update_weight_metadata(font, font_path)
             self.update_style_flags(font, font_path)
+
+            if scale != 1.0:
+                self.scale_font(font, scale)
+                logger.info(f"  Scaled glyphs and advances to {scale:.3g}x")
 
             if kern_mode in ("add-legacy-kern", "legacy-kern-only"):
                 kern_pairs = self.extract_kern_pairs(font)
@@ -2131,6 +2283,7 @@ Examples:
 
   Custom processing:
   %(prog)s --prefix KF --name="Fonty" --line-percent 20 --kern add-legacy-kern --outline apply *.ttf
+  %(prog)s --preset nv --name="Clara" --scale 1.08 *.otf
 
   If no preset or flags are provided, you will be prompted to choose a preset.
         """
@@ -2146,6 +2299,9 @@ Examples:
         help="Prefix to add to font names. Set to empty string to omit prefix.")
     parser.add_argument("--line-percent", type=int,
         help="Line spacing adjustment percentage. Set to 0 to make no changes to line spacing.")
+    parser.add_argument("--scale", type=float,
+        help="Scale glyph outlines, advances, and kerning inside the current UPM. "
+             "Use 1.0 for no scaling, 1.08 for 108%%, etc.")
     parser.add_argument("--kern", type=str,
         choices=["add-legacy-kern", "legacy-kern-only", "skip"],
         help="Kerning mode: 'add-legacy-kern' extracts GPOS pairs into a legacy kern table, "
@@ -2171,7 +2327,7 @@ Examples:
         logging.getLogger().setLevel(logging.DEBUG)
 
     # Determine which flags were explicitly set by the user
-    manual_flags = {k for k in ("prefix", "line_percent", "kern", "outline", "remove_prefix", "name")
+    manual_flags = {k for k in ("prefix", "line_percent", "kern", "outline", "remove_prefix", "name", "scale")
                     if getattr(args, k) is not None}
 
     # If no preset and no manual flags, prompt the user to choose a preset
@@ -2201,6 +2357,10 @@ Examples:
         args.kern = "skip"
     if args.outline is None:
         args.outline = "apply"
+    if args.scale is None:
+        args.scale = 1.0
+    if args.scale <= 0:
+        parser.error("--scale must be greater than zero.")
 
     if args.name and args.remove_prefix:
         logger.warning("--name and --remove-prefix were both specified. --name takes precedence; --remove-prefix will be ignored.")
@@ -2247,6 +2407,7 @@ Examples:
             args.dry_run,
             args.outline,
             args.stamp,
+            args.scale,
         ):
             success_count += 1
 
