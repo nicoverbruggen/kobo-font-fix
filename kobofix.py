@@ -35,6 +35,7 @@ configured via individual flags. Run with -h for usage details.
 
 Requirements:
 - fontTools (pip install fonttools)
+- FontForge (required for OTF/CFF inputs)
 - font-line (pip install font-line)
 - skia-pathops (pip install skia-pathops)
 - ttfautohint
@@ -50,6 +51,7 @@ import subprocess
 import argparse
 import logging
 import string
+import tempfile
 from datetime import date
 from pathlib import Path
 from collections import defaultdict
@@ -1235,7 +1237,7 @@ class FontProcessor:
         changes = []
 
         if is_otf:
-            changes.append("Convert OTF (CFF) to TTF (glyf, quadratic outlines)")
+            changes.append("Convert OTF (CFF) to TTF with FontForge")
 
         # Check Coverage sort order in GSUB/GPOS
         unsorted_cov = 0
@@ -1781,7 +1783,13 @@ class FontProcessor:
 
         is_otf = "CFF " in font
         if is_otf:
-            logger.info("  Source: OTF (CFF outlines, will be converted to TTF)")
+            logger.info("  Source: OTF (CFF outlines, will be converted to TTF via FontForge)")
+            font.close()
+            try:
+                font = fontforge_otf_to_ttf(font_path)
+            except Exception as e:
+                logger.error(f"  FontForge OTF->TTF conversion failed: {e}")
+                return False
 
         # Report hinting status
         has_meaningful_hints = self._font_has_meaningful_hints(font)
@@ -1821,12 +1829,6 @@ class FontProcessor:
 
         # Apply changes
         try:
-            # OTF→TTF must run first so every subsequent step operates on
-            # a real TrueType font (no CFF Name INDEX, no cubic outlines).
-            if is_otf:
-                otf_to_ttf(font)
-                logger.info("  Converted CFF outlines to TrueType (quadratic)")
-
             # Remove WWS names
             if "name" in font and font["name"]:
                 old_names_list = font["name"].names
@@ -2015,13 +2017,55 @@ def otf_to_ttf(font: TTFont, max_err: float = 1.0) -> None:
         maxp.maxComponentDepth = 0
 
 
+def fontforge_otf_to_ttf(font_path: str) -> TTFont:
+    """Convert an OTF/CFF font to a fully loaded TTF using FontForge.
+
+    FontForge is intentionally used here instead of the in-process fontTools
+    cubic-to-quadratic path: Kobo's renderer is sensitive to some generated TTF
+    details, and FontForge's save path has proven more conservative for CFF OTF
+    sources.
+    """
+    fontforge = shutil.which("fontforge")
+    if fontforge is None:
+        raise RuntimeError("fontforge is required for OTF/CFF inputs")
+
+    script = (
+        "import fontforge, sys; "
+        "font = fontforge.open(sys.argv[1]); "
+        "font.generate(sys.argv[2], flags=('opentype', 'round')); "
+        "font.close()"
+    )
+
+    with tempfile.TemporaryDirectory(prefix="kobofix-otf-") as tmpdir:
+        output_path = os.path.join(tmpdir, "converted.ttf")
+        try:
+            subprocess.run(
+                [fontforge, "-lang=py", "-c", script, font_path, output_path],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            message = (e.stderr or str(e)).strip()
+            raise RuntimeError(message) from e
+
+        converted = TTFont(output_path)
+        converted.ensureDecompiled()
+        logger.info("  Converted OTF to TrueType with FontForge")
+        return converted
+
+
 def check_dependencies(
     require_font_line: bool = True,
     require_pathops: bool = True,
     require_ttfautohint: bool = True,
+    require_fontforge: bool = False,
 ) -> None:
     """Check that all required external tools are available before processing."""
     missing = []
+    if require_fontforge and shutil.which("fontforge") is None:
+        missing.append("fontforge")
     if require_font_line and shutil.which("font-line") is None:
         missing.append("font-line")
     if require_ttfautohint and shutil.which("ttfautohint") is None:
@@ -2093,7 +2137,7 @@ Examples:
     )
 
     parser.add_argument("fonts", nargs="+",
-        help="Font files to process (*.ttf). You can use a wildcard (glob).")
+        help="Font files to process (*.ttf, *.otf). You can use a wildcard (glob).")
     parser.add_argument("--preset", type=str, choices=PRESETS.keys(),
         help=f"Use a preset configuration ({preset_names}).")
     parser.add_argument("--name", type=str,
@@ -2166,6 +2210,7 @@ Examples:
         require_font_line=args.line_percent != 0,
         require_pathops=args.outline == "apply",
         require_ttfautohint=args.prefix != "KF" and args.outline == "apply",
+        require_fontforge=any(path.lower().endswith(".otf") for path in args.fonts),
     )
 
     valid_files, invalid_files = validate_font_files(args.fonts)
