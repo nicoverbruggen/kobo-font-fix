@@ -1741,6 +1741,18 @@ class FontProcessor:
             return w if w is not None else round(upm / 4)
         return round(upm / 5)
 
+    @staticmethod
+    def _vmtx_default(font: TTFont) -> Tuple[int, int]:
+        if "vmtx" not in font:
+            return (0, 0)
+        vmtx = font["vmtx"].metrics
+        for name in ("space", ".notdef"):
+            if name in vmtx:
+                return vmtx[name]
+        if vmtx:
+            return next(iter(vmtx.values()))
+        return (0, 0)
+
     @classmethod
     def add_missing_spaces(cls, font: TTFont) -> List[Tuple[int, int]]:
         """Add glyphs for common Unicode space characters the font is missing.
@@ -1773,6 +1785,8 @@ class FontProcessor:
                 if name not in order:
                     font.setGlyphOrder(order + [name])
                 font["hmtx"][name] = (width, 0)
+                if "vmtx" in font:
+                    font["vmtx"][name] = cls._vmtx_default(font)
 
             for table in font["cmap"].tables:
                 if table.isUnicode():
@@ -1821,6 +1835,12 @@ class FontProcessor:
                 if name not in order:
                     font.setGlyphOrder(order + [name])
                 font["hmtx"][name] = font["hmtx"][source_name]
+                if "vmtx" in font:
+                    vmtx = font["vmtx"].metrics
+                    if source_name in vmtx:
+                        vmtx[name] = vmtx[source_name]
+                    else:
+                        vmtx[name] = cls._vmtx_default(font)
 
             for table in font["cmap"].tables:
                 if table.isUnicode():
@@ -1896,6 +1916,8 @@ class FontProcessor:
             if name not in order:
                 font.setGlyphOrder(order + [name])
             font["hmtx"][name] = (width, lsb)
+            if "vmtx" in font:
+                font["vmtx"][name] = cls._vmtx_default(font)
 
         for table in font["cmap"].tables:
             if table.isUnicode():
