@@ -4,16 +4,16 @@
 
 **`kobofix.py` is a Python script designed to process and adjust TrueType fonts for Kobo e-readers for a better reading experience with the default `kepub` renderer.**
 
-It generates a renamed font, fixes PANOSE information based on the filename, adjusts the baseline with the `font-line` utility, simplifies outlines with `skia-pathops`, flattens composite glyphs for Kobo compatibility, strips TrueType hinting from KF fonts and gives every outline glyph the same no-op TrueType instruction (so Kobo's iType rasterizer renders the raw outline instead of producing a vertical "wobble"), adds glyphs for common Unicode space characters the font is missing (thin space, narrow no-break space, en/em spaces, and more), adds a legacy `kern` table which allows the `kepub` engine for improved rendering of kerned pairs, and validates finished output with `ots-sanitize`.
+Fonts are taken through a whole pipeline that makes them more likely to work correctly on Kobo devices. The fonts are modified and renamed, and metadata is tuned up. The script itself can be used on any TrueType or OpenType font. What the default "Kobo Fix" preset does is documented below.
 
 > [!NOTE]
 > You can also use this to modify or fix your own, legally acquired fonts, assuming you are legally allowed to do so. The author of this script does not recommend modifying fonts which don't specify in their license agreement that they can be modified. Using this script is done at your own risk. 
 
 ## Requirements
 
-Docker or Podman is recommended. The [`fntbld-oci`](https://github.com/nicoverbruggen/fntbld-oci/pkgs/container/fntbld-oci) container is the easiest way to build the actual fonts.
+Docker or Podman is recommended. The [`fntbld-oci`](https://github.com/nicoverbruggen/fntbld-oci/pkgs/container/fntbld-oci) container is the easiest way to build the actual fonts!
 
-Alternatively, you can also install the dependencies and run the script locally. Python 3, FontTools, and `ots-sanitize` are always required. Depending on the enabled operations, you may also need `font-line`, `skia-pathops`, and `ttfautohint`. The KF preset does not use `ttfautohint`.
+Alternatively, you can also install the dependencies and run the script locally. Python 3, FontTools, and `ots-sanitize` are always required. Depending on the enabled operations, you may also need `font-line`, `skia-pathops`, and `ttfautohint`. The KF preset does not use `ttfautohint`. If you plan on going this route, I recommend using the `venv` module to set up a separate Python environment.
 
 ## Usage
 
