@@ -903,6 +903,43 @@ class FontProcessor:
     # Name table methods
     # ============================================================
     
+    @staticmethod
+    def _unique_id_version(font: TTFont, current_unique: Optional[str]) -> str:
+        """
+        Return the version string to embed in the Unique ID (name ID 3).
+
+        Name ID 5 is the font's actual version, so it is preferred. Falling back
+        to whatever the previous Unique ID happened to contain is unreliable:
+        plenty of fonts use a Unique ID that never mentions a version at all
+        (e.g. Bitter's '3.021;NONE;Bitter-Bold'), which would otherwise be
+        reported as version 1.000 regardless of the real version.
+        """
+        for candidate in (font["name"].getDebugName(5), current_unique):
+            if not candidate:
+                continue
+            match = re.search(r"Version\s+\d+(?:\.\d+)*", candidate)
+            if match:
+                return " ".join(match.group(0).split())
+            match = re.search(r"\d+\.\d+", candidate)
+            if match:
+                return f"Version {match.group(0)}"
+        return "Version 1.000"
+
+    @classmethod
+    def _target_unique_id(cls, font: TTFont, adjusted_full_name: str) -> Optional[str]:
+        """
+        The Unique ID (name ID 3) this font should carry.
+
+        Built from the full name rather than the family name, so each style of a
+        family gets its own ID; a family-only ID is identical across every style,
+        which defeats the record's purpose.
+        """
+        if "name" not in font:
+            return None
+        existing = font["name"].getName(3, 3, 1)
+        current = existing.toUnicode() if existing else None
+        return f"{adjusted_full_name.strip()}:{cls._unique_id_version(font, current)}"
+
     def rename_font(self, font: TTFont, metadata: FontMetadata) -> None:
         """
         Update the font's name-related metadata.
@@ -938,14 +975,10 @@ class FontProcessor:
 
         # Update Unique ID (ID 3)
         try:
-            current_unique = font["name"].getName(3, 3, 1).toUnicode()
-            parts = current_unique.split("Version")
-            version_info = f"Version{parts[1]}" if len(parts) == 2 else "Version 1.000"
-            if self.prefix:
-                new_unique_id = f"{self.prefix} {metadata.family_name.strip()}:{version_info}"
-            else:
-                new_unique_id = f"{metadata.family_name.strip()}:{version_info}"
-            if current_unique != new_unique_id:
+            existing = font["name"].getName(3, 3, 1)
+            current_unique = existing.toUnicode() if existing else None
+            new_unique_id = self._target_unique_id(font, adjusted_full_name)
+            if new_unique_id and current_unique != new_unique_id:
                 self._set_name_records(font, 3, new_unique_id)
         except Exception as e:
             logger.warning(f"  Failed to update Unique ID: {e}")
@@ -1418,6 +1451,16 @@ class FontProcessor:
         current_full = font["name"].getBestFullName() if "name" in font else None
         if current_full != target_full:
             changes.append(f"Rename font to '{target_full}'")
+
+        # Check Unique ID (ID 3). Checked separately from the rename above: a font
+        # can carry correct names and still have a stale or duplicated Unique ID,
+        # and without this the font is reported as needing no changes at all.
+        if "name" in font:
+            existing_unique = font["name"].getName(3, 3, 1)
+            current_unique = existing_unique.toUnicode() if existing_unique else None
+            target_unique = self._target_unique_id(font, target_full)
+            if target_unique and current_unique != target_unique:
+                changes.append(f"Update Unique ID to '{target_unique}'")
 
         # Check PANOSE
         style_name, _ = self._get_style_from_filename(font_path)

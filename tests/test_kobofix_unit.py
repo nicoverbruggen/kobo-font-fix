@@ -93,6 +93,82 @@ class KobofixUnitTests(unittest.TestCase):
         self.assertEqual(font["name"].getBestFullName(), "KF Readerly Italic")
         self.assertEqual(font["name"].getName(18, 1, 0, 0).toUnicode(), "KF Readerly Italic")
 
+    def _name_font(self, *, unique_id: str, version: str, family: str, style: str, full: str) -> TTFont:
+        font = TTFont()
+        name_table = newTable("name")
+        name_table.names = []
+        for platform_id, plat_enc_id, lang_id in ((1, 0, 0), (3, 1, 0x409)):
+            name_table.setName(family, 1, platform_id, plat_enc_id, lang_id)
+            name_table.setName(style, 2, platform_id, plat_enc_id, lang_id)
+            name_table.setName(unique_id, 3, platform_id, plat_enc_id, lang_id)
+            name_table.setName(full, 4, platform_id, plat_enc_id, lang_id)
+            name_table.setName(version, 5, platform_id, plat_enc_id, lang_id)
+        font["name"] = name_table
+        return font
+
+    def test_unique_id_takes_version_from_name_id_5(self) -> None:
+        """A unique ID that never mentions a version must not report 1.000."""
+        font = self._name_font(
+            unique_id="3.021;NONE;Bitter-Bold",
+            version="Version 3.021",
+            family="Bitter",
+            style="Bold",
+            full="Bitter Bold",
+        )
+        processor = FontProcessor(prefix="NV", line_percent=0)
+        processor.rename_font(
+            font,
+            FontMetadata(family_name="Bitter", style_name="Bold", full_name="Bitter Bold", ps_name="NV_Bitter-Bold"),
+        )
+        self.assertEqual(font["name"].getName(3, 3, 1, 0x409).toUnicode(), "NV Bitter Bold:Version 3.021")
+
+    def test_unique_id_is_distinct_per_style(self) -> None:
+        """Every style of a family must get its own unique ID."""
+        ids = []
+        for style, full in (("Regular", "Bitter"), ("Bold", "Bitter Bold"), ("Italic", "Bitter Italic")):
+            font = self._name_font(
+                unique_id="3.021;NONE;Bitter", version="Version 3.021", family="Bitter", style=style, full=full
+            )
+            processor = FontProcessor(prefix="NV", line_percent=0)
+            processor.rename_font(
+                font,
+                FontMetadata(family_name="Bitter", style_name=style, full_name=full, ps_name=f"NV_Bitter-{style}"),
+            )
+            ids.append(font["name"].getName(3, 3, 1, 0x409).toUnicode())
+        self.assertEqual(len(set(ids)), len(ids), f"unique IDs collided across styles: {ids}")
+
+    def test_unique_id_tolerates_version_with_trailing_junk(self) -> None:
+        font = self._name_font(
+            unique_id="whatever",
+            version="Version 1.063; ttfautohint (v1.8.4.16-eb64)",
+            family="Kierkegaard",
+            style="Regular",
+            full="Kierkegaard",
+        )
+        processor = FontProcessor(prefix="NV", line_percent=0)
+        processor.rename_font(
+            font,
+            FontMetadata(family_name="Kierkegaard", style_name="Regular", full_name="Kierkegaard", ps_name="NV_Kierkegaard"),
+        )
+        self.assertEqual(font["name"].getName(3, 3, 1, 0x409).toUnicode(), "NV Kierkegaard:Version 1.063")
+
+    def test_unique_id_falls_back_when_no_version_anywhere(self) -> None:
+        font = TTFont()
+        name_table = newTable("name")
+        name_table.names = []
+        for platform_id, plat_enc_id, lang_id in ((1, 0, 0), (3, 1, 0x409)):
+            name_table.setName("Mystery", 1, platform_id, plat_enc_id, lang_id)
+            name_table.setName("Regular", 2, platform_id, plat_enc_id, lang_id)
+            name_table.setName("no version here", 3, platform_id, plat_enc_id, lang_id)
+            name_table.setName("Mystery", 4, platform_id, plat_enc_id, lang_id)
+        font["name"] = name_table
+        processor = FontProcessor(prefix="NV", line_percent=0)
+        processor.rename_font(
+            font,
+            FontMetadata(family_name="Mystery", style_name="Regular", full_name="Mystery", ps_name="NV_Mystery"),
+        )
+        self.assertEqual(font["name"].getName(3, 3, 1, 0x409).toUnicode(), "NV Mystery:Version 1.000")
+
     def test_analyze_changes_handles_fonts_without_name_table(self) -> None:
         font = TTFont()
         processor = FontProcessor(prefix="KF", line_percent=0)
