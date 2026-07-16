@@ -42,6 +42,7 @@ The KF preset is the Kobo-specific path and should be treated carefully.
 
 - Applies the `KF` prefix and strips known existing prefixes such as `NV` and `KF` before applying the new prefix.
 - Adds a legacy `kern` table from GPOS kerning pairs.
+- Removes the GPOS `cpsp` (Capital Spacing) feature. Kobo's kepub renderer applies it to body text when `optimizeLegibility` is on (the same setting under which it reads GPOS kerning), spacing capitals away from their neighbours. `cpsp` is not a default OpenType feature, so removal is correct for running text; kerning and other features are untouched. Handled by `FontProcessor.remove_layout_feature`.
 - Simplifies outlines, removes overlaps, cleans degenerate contours, and flattens composite glyphs unless `--outline skip` is used.
 - Removes TrueType hinting from KF fonts and gives every outline glyph the same no-op TrueType instruction: `SVTCA[Y]`, opcode `0x00`. This is done to avoid needing to install [NickelHintFix](https://github.com/nicoverbruggen/NickelHintFix).
 - This no-op instruction is intentional. Kobo's iType rasterizer applies automatic grid-fitting to glyphs with no per-glyph instructions, which can cause vertical wobble. A no-op per-glyph program routes iType through its interpreter while leaving the outline unchanged.

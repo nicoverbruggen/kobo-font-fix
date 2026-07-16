@@ -775,6 +775,95 @@ class KobofixUnitTests(unittest.TestCase):
             ]
             self.assertEqual(retained_names, [])
 
+    def _gpos_font(self, tags, feature_index, req_index=0xFFFF):
+        """Build a TTFont whose GPOS carries `tags` as FeatureRecords, with a
+        single default LangSys referencing `feature_index` (and `req_index`)."""
+        font = TTFont()
+        feat_list = types.SimpleNamespace(
+            FeatureRecord=[
+                types.SimpleNamespace(
+                    FeatureTag=tag,
+                    Feature=types.SimpleNamespace(LookupListIndex=[]),
+                )
+                for tag in tags
+            ],
+            FeatureCount=len(tags),
+        )
+        default_lang_sys = types.SimpleNamespace(
+            FeatureIndex=list(feature_index),
+            FeatureCount=len(feature_index),
+            ReqFeatureIndex=req_index,
+        )
+        script = types.SimpleNamespace(
+            DefaultLangSys=default_lang_sys, LangSysRecord=[]
+        )
+        table = types.SimpleNamespace(
+            FeatureList=feat_list,
+            ScriptList=types.SimpleNamespace(
+                ScriptRecord=[types.SimpleNamespace(Script=script)]
+            ),
+        )
+        font["GPOS"] = types.SimpleNamespace(table=table)
+        return font, table, default_lang_sys
+
+    def test_remove_layout_feature_drops_cpsp_and_remaps_indices(self) -> None:
+        # ReqFeatureIndex points at 'case' (index 2) to check it is remapped.
+        font, table, lang_sys = self._gpos_font(
+            ["kern", "cpsp", "case"], [0, 1, 2], req_index=2
+        )
+
+        removed = FontProcessor.remove_layout_feature(font, "GPOS", "cpsp")
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(
+            [fr.FeatureTag for fr in table.FeatureList.FeatureRecord], ["kern", "case"]
+        )
+        self.assertEqual(table.FeatureList.FeatureCount, 2)
+        # kern 0->0, case 2->1; the dropped cpsp (1) is gone with no dangling index
+        self.assertEqual(lang_sys.FeatureIndex, [0, 1])
+        self.assertEqual(lang_sys.FeatureCount, 2)
+        self.assertEqual(lang_sys.ReqFeatureIndex, 1)
+        self.assertFalse(FontProcessor._has_layout_feature(font, "GPOS", "cpsp"))
+
+    def test_remove_layout_feature_clears_required_when_it_is_removed(self) -> None:
+        # ReqFeatureIndex points at the feature being removed -> must become none.
+        font, _, lang_sys = self._gpos_font(["cpsp", "kern"], [0, 1], req_index=0)
+        self.assertEqual(FontProcessor.remove_layout_feature(font, "GPOS", "cpsp"), 1)
+        self.assertEqual(lang_sys.FeatureIndex, [0])
+        self.assertEqual(lang_sys.ReqFeatureIndex, 0xFFFF)
+
+    def test_remove_layout_feature_is_noop_when_absent(self) -> None:
+        font, table, lang_sys = self._gpos_font(["kern", "case"], [0, 1])
+        self.assertEqual(FontProcessor.remove_layout_feature(font, "GPOS", "cpsp"), 0)
+        self.assertEqual(
+            [fr.FeatureTag for fr in table.FeatureList.FeatureRecord], ["kern", "case"]
+        )
+        self.assertEqual(lang_sys.FeatureIndex, [0, 1])
+
+    def test_kf_analyze_reports_cpsp_removal(self) -> None:
+        font, _, _ = self._gpos_font(["kern", "cpsp"], [0, 1])
+        processor = FontProcessor(prefix="KF", line_percent=0)
+        metadata = FontMetadata(
+            family_name="Readerly", style_name="Regular",
+            full_name="Readerly", ps_name="KF_Readerly",
+        )
+        changes = processor._analyze_changes(
+            font, "/tmp/Readerly-Regular.ttf", kern_mode="skip", metadata=metadata
+        )
+        self.assertIn("Remove cpsp (Capital Spacing) feature from GPOS", changes)
+
+    def test_nv_analyze_keeps_cpsp(self) -> None:
+        font, _, _ = self._gpos_font(["kern", "cpsp"], [0, 1])
+        processor = FontProcessor(prefix="NV", line_percent=0)
+        metadata = FontMetadata(
+            family_name="Readerly", style_name="Regular",
+            full_name="Readerly", ps_name="NV_Readerly",
+        )
+        changes = processor._analyze_changes(
+            font, "/tmp/Readerly-Regular.ttf", kern_mode="skip", metadata=metadata
+        )
+        self.assertNotIn("Remove cpsp (Capital Spacing) feature from GPOS", changes)
+
 
 if __name__ == "__main__":
     unittest.main()

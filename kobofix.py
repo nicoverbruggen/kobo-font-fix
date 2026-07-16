@@ -29,6 +29,9 @@ Processes TrueType fonts to improve compatibility with Kobo e-readers:
   same no-op TrueType instruction, so Kobo's iType rasterizer runs its
   interpreter instead of its auto-grid-fit (which snaps the same letter to
   different pixel heights, a vertical "wobble"). The outline is left unchanged
+- Capital-spacing fix (KF preset): removing the GPOS 'cpsp' (Capital Spacing)
+  feature, which Kobo's kepub renderer wrongly applies to body text (when
+  optimizeLegibility is on), pushing every capital away from its neighbour
 
 Supports --dry-run to preview what would change without modifying files.
 Includes NV and KF presets for common workflows, or can be fully
@@ -899,6 +902,69 @@ class FontProcessor:
                         fixed += 1
         return fixed
 
+    @staticmethod
+    def _has_layout_feature(font: TTFont, table_tag: str, feature_tag: str) -> bool:
+        """True if GSUB/GPOS carries a feature with the given tag."""
+        if table_tag not in font:
+            return False
+        table = getattr(font[table_tag], "table", None)
+        feat_list = getattr(table, "FeatureList", None) if table else None
+        if feat_list is None:
+            return False
+        return any(fr.FeatureTag == feature_tag for fr in feat_list.FeatureRecord)
+
+    @classmethod
+    def remove_layout_feature(cls, font: TTFont, table_tag: str, feature_tag: str) -> int:
+        """Remove an OpenType layout feature (by tag) from GSUB/GPOS.
+
+        Drops the matching FeatureRecord(s) and every Script/LangSys reference
+        to them, remapping the surviving feature indices so nothing dangles.
+        Orphaned lookups are left in place: unreferenced lookups are valid and
+        harmless, and removing them would mean reindexing every LookupListIndex.
+
+        Returns the number of feature records removed.
+
+        Used to strip 'cpsp' (Capital Spacing) from KF fonts. Kobo's kepub
+        renderer applies cpsp to ordinary body text (when optimizeLegibility is
+        on, the same setting under which it reads GPOS kerning), pushing every
+        capital away from its neighbour, e.g. the D in "Docks". cpsp is not a
+        default OpenType feature, so removing it is correct for running text and
+        only drops spacing that a caller would have had to request for all-caps.
+        """
+        if table_tag not in font:
+            return 0
+        table = getattr(font[table_tag], "table", None)
+        feat_list = getattr(table, "FeatureList", None) if table else None
+        if feat_list is None:
+            return 0
+        records = feat_list.FeatureRecord
+        remove = {i for i, fr in enumerate(records) if fr.FeatureTag == feature_tag}
+        if not remove:
+            return 0
+
+        kept = [i for i in range(len(records)) if i not in remove]
+        remap = {old: new for new, old in enumerate(kept)}
+        feat_list.FeatureRecord = [records[i] for i in kept]
+        feat_list.FeatureCount = len(feat_list.FeatureRecord)
+
+        script_list = getattr(table, "ScriptList", None)
+        if script_list is not None:
+            for script_rec in script_list.ScriptRecord:
+                script = script_rec.Script
+                lang_systems = []
+                if script.DefaultLangSys is not None:
+                    lang_systems.append(script.DefaultLangSys)
+                lang_systems.extend(r.LangSys for r in (script.LangSysRecord or []))
+                for lang_sys in lang_systems:
+                    lang_sys.FeatureIndex = [
+                        remap[i] for i in lang_sys.FeatureIndex if i in remap
+                    ]
+                    lang_sys.FeatureCount = len(lang_sys.FeatureIndex)
+                    req = getattr(lang_sys, "ReqFeatureIndex", 0xFFFF)
+                    if req != 0xFFFF:
+                        lang_sys.ReqFeatureIndex = remap.get(req, 0xFFFF)
+        return len(remove)
+
     # ============================================================
     # Name table methods
     # ============================================================
@@ -1556,6 +1622,13 @@ class FontProcessor:
             if kern_mode == "legacy-kern-only" and has_gpos:
                 changes.append("Remove GPOS table")
 
+        # KF: strip the Capital Spacing (cpsp) feature. Kobo's kepub renderer
+        # applies it to body text (with optimizeLegibility on, the same setting
+        # under which it reads GPOS kerning), spacing every capital away from its
+        # neighbour. cpsp is not a default feature, so removing it is safe.
+        if self.prefix == "KF" and self._has_layout_feature(font, "GPOS", "cpsp"):
+            changes.append("Remove cpsp (Capital Spacing) feature from GPOS")
+
         # Check composite outlines
         if outline_mode == "apply" and "glyf" in font:
             composite_count = sum(
@@ -2066,6 +2139,12 @@ class FontProcessor:
 
                 if kern_mode == "legacy-kern-only" and "GPOS" in font:
                     del font["GPOS"]
+
+            # KF: drop Capital Spacing (cpsp) so Kobo can't space capitals away
+            # from their neighbours in body text. See remove_layout_feature.
+            if self.prefix == "KF":
+                if self.remove_layout_feature(font, "GPOS", "cpsp"):
+                    logger.info("  Removed cpsp (Capital Spacing) feature from GPOS")
 
             if outline_mode == "apply":
                 if self.simplify_outlines(font):
