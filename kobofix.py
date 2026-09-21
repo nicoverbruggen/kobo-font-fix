@@ -1223,9 +1223,10 @@ class FontProcessor:
             return
 
         panose = font["OS/2"].panose
-        # bFamilyType 0 means "Any" — the font has no meaningful PANOSE data
-        if panose.bFamilyType == 0:
-            logger.info("  No PANOSE classification set (bFamilyType=0); skipping check.")
+        # An unspecified family can still carry a weight.
+        # Leave unspecified weights alone when the family is also unspecified.
+        if panose.bFamilyType == 0 and panose.bWeight in (0, 1):
+            logger.info("  No PANOSE family or weight classification set; skipping check.")
             return
         expected = style_specs.get(style_name)
         if not expected:
@@ -1238,7 +1239,7 @@ class FontProcessor:
             panose.bWeight = expected["weight"]
             changes.append(f"bWeight {old_weight}->{expected['weight']}")
 
-        if panose.bLetterForm != expected["letterform"]:
+        if panose.bFamilyType != 0 and panose.bLetterForm != expected["letterform"]:
             old_letterform = panose.bLetterForm
             panose.bLetterForm = expected["letterform"]
             changes.append(f"bLetterForm {old_letterform}->{expected['letterform']}")
@@ -1538,13 +1539,13 @@ class FontProcessor:
         }
         if "OS/2" in font and hasattr(font["OS/2"], "panose") and font["OS/2"].panose:
             panose = font["OS/2"].panose
-            # Skip fonts with no meaningful PANOSE data (bFamilyType 0 = "Any")
-            if panose.bFamilyType != 0:
+            # Match the weight-only correction for an unspecified family.
+            if panose.bFamilyType != 0 or panose.bWeight not in (0, 1):
                 expected = style_specs.get(style_name, {})
                 if expected:
                     if panose.bWeight != expected["weight"]:
                         changes.append(f"Fix PANOSE bWeight: {panose.bWeight} -> {expected['weight']}")
-                    if panose.bLetterForm != expected["letterform"]:
+                    if panose.bFamilyType != 0 and panose.bLetterForm != expected["letterform"]:
                         changes.append(f"Fix PANOSE bLetterForm: {panose.bLetterForm} -> {expected['letterform']}")
 
         # Check weight metadata

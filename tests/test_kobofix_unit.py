@@ -204,6 +204,48 @@ class KobofixUnitTests(unittest.TestCase):
         self.assertEqual(font["OS/2"].panose.bWeight, 8)
         self.assertEqual(font["OS/2"].panose.bLetterForm, 3)
 
+    def test_panose_weight_without_family_matches_style_and_preview(self) -> None:
+        processor = FontProcessor(prefix="KF", line_percent=0)
+        for style, old_weight, expected in (
+            ("Regular", 8, 5), ("Italic", 8, 5),
+            ("Bold", 5, 8), ("BoldItalic", 5, 8),
+        ):
+            with self.subTest(style=style):
+                font = TTFont()
+                panose = types.SimpleNamespace(bFamilyType=0, bWeight=old_weight, bLetterForm=0)
+                font["OS/2"] = types.SimpleNamespace(panose=panose)
+                path = f"/tmp/Radley-{style}.ttf"
+                metadata = FontMetadata(
+                    family_name="Radley", style_name=style,
+                    full_name=f"Radley {style}", ps_name=f"KF_Radley-{style}",
+                )
+                changes = processor._analyze_changes(font, path, kern_mode="skip", metadata=metadata)
+                self.assertEqual(
+                    [change for change in changes if "PANOSE" in change],
+                    [f"Fix PANOSE bWeight: {old_weight} -> {expected}"],
+                )
+                processor.check_and_fix_panose(font, path)
+                self.assertEqual(vars(panose), dict(bFamilyType=0, bWeight=expected, bLetterForm=0))
+                changes = processor._analyze_changes(font, path, kern_mode="skip", metadata=metadata)
+                self.assertFalse(any("PANOSE" in change for change in changes))
+
+    def test_panose_without_family_or_weight_stays_unspecified(self) -> None:
+        processor = FontProcessor(prefix="KF", line_percent=0)
+        for weight in (0, 1):
+            with self.subTest(weight=weight):
+                font = TTFont()
+                panose = types.SimpleNamespace(bFamilyType=0, bWeight=weight, bLetterForm=0)
+                font["OS/2"] = types.SimpleNamespace(panose=panose)
+                path = "/tmp/Readerly-BoldItalic.ttf"
+                metadata = FontMetadata(
+                    family_name="Readerly", style_name="Bold Italic",
+                    full_name="Readerly Bold Italic", ps_name="KF_Readerly-BoldItalic",
+                )
+                changes = processor._analyze_changes(font, path, kern_mode="skip", metadata=metadata)
+                self.assertFalse(any("PANOSE" in change for change in changes))
+                processor.check_and_fix_panose(font, path)
+                self.assertEqual(vars(panose), dict(bFamilyType=0, bWeight=weight, bLetterForm=0))
+
     def test_update_weight_metadata_updates_os2_weight_class(self) -> None:
         font = TTFont()
         font["OS/2"] = types.SimpleNamespace(usWeightClass=400)
